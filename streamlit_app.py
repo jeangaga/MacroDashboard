@@ -146,19 +146,107 @@ def sidebar():
     }
 
 
+_CMD_HELP = """
+**Command syntax** — type any combination, order doesn't matter.
+
+| What you type | Effect |
+|---|---|
+| `CPI US` | Keyword `CPI`, scope `USD` |
+| `CPI Australia` | Keyword `CPI`, scope `AUD` |
+| `inflation EM` | Theme `Inflation`, scope `EM` |
+| `**** inflation EM` | Importance `****`, theme `Inflation`, scope `EM` |
+| `QUICK EUR` | All `***+` releases for EUR |
+| `QUICK2US` | All `****` releases for USD |
+| `labor Japan` | Theme `Labor`, scope `JPY` |
+| `retail UK CPI` | Keyword `retail CPI`, scope `GBP` |
+
+**Scopes** — regions: `USD EUR DM EM`;
+DM currencies: `AUD CAD CHF GBP JPY NOK SEK`;
+EM currencies: `BRL CNH INR KRW MXN PLN TRY TWD ZAR`;
+PM files: `WEEKPM MACROPM SHORT_WEEK ARC`.
+
+**Aliases** — `US` = `USD`, `UK` = `GBP`, `EU` = `EUR`, `Japan` = `JPY`,
+`China` = `CNH`, `Brazil` = `BRL`, `Australia` = `AUD`, etc.
+
+**Importance** — `*` through `****` sets the minimum stars.
+
+**Themes** — any theme name from the sidebar list.
+
+Everything else becomes a free-text keyword search over title + body.
+""".strip()
+
+
 def command_bar():
+    if "active_command" not in st.session_state:
+        st.session_state["active_command"] = {}
+    if "show_cmd_help" not in st.session_state:
+        st.session_state["show_cmd_help"] = False
+
     with st.container(border=True):
-        cols = st.columns([6, 1])
+        cols = st.columns([6, 1, 1, 1])
         cmd = cols[0].text_input(
             "Command",
             value="",
             label_visibility="collapsed",
-            placeholder="QUICK EUR  |  **** inflation EM  |  CPI AUD  |  labor US",
+            placeholder="CPI US  |  **** inflation EM  |  QUICK EUR  |  labor Japan",
         )
         go = cols[1].button("Run", use_container_width=True)
+        help_clicked = cols[2].button("?", use_container_width=True, help="Show command syntax")
+        clear_clicked = cols[3].button("Clear", use_container_width=True, help="Clear active command")
+
+        if help_clicked:
+            st.session_state["show_cmd_help"] = not st.session_state["show_cmd_help"]
+        if clear_clicked:
+            st.session_state["active_command"] = {}
+        if st.session_state["show_cmd_help"]:
+            st.markdown(_CMD_HELP)
+
     if go and cmd.strip():
-        return parse_command(cmd)
-    return {}
+        parsed = parse_command(cmd)
+        parsed["_raw"] = cmd.strip()
+        st.session_state["active_command"] = parsed
+        return parsed
+    return st.session_state["active_command"]
+
+
+def _command_summary(cmd):
+    if not cmd:
+        return ""
+    bits = []
+    if cmd.get("regions"):
+        bits.append("scopes=" + ",".join(cmd["regions"]))
+    if cmd.get("min_importance"):
+        bits.append("importance>=" + cmd["min_importance"])
+    if cmd.get("themes"):
+        bits.append("themes=" + ",".join(cmd["themes"]))
+    if cmd.get("query"):
+        bits.append("query=" + repr(cmd["query"]))
+    return "  |  ".join(bits) if bits else "(no filters parsed)"
+
+
+def render_command_results(command_state):
+    if not command_state:
+        return
+    # filter-relevant keys only
+    relevant = {k: v for k, v in command_state.items() if k in {"query", "regions", "min_importance", "themes"} and v}
+    if not relevant:
+        st.info(
+            "Command parsed but produced no filters. "
+            "Try something like `CPI US` or `**** inflation EM`."
+        )
+        return
+
+    st.divider()
+    hdr_cols = st.columns([4, 1])
+    raw = command_state.get("_raw", "")
+    hdr_cols[0].subheader(f"Command results: `{raw}`")
+    hdr_cols[0].caption(_command_summary(command_state))
+    hdr_cols[1].caption("Filters apply across the whole archive.")
+
+    all_results = _load_many(ALL_NOTE_FILES)
+    all_releases = releases_from_load_results(all_results)
+    filtered = filter_releases(all_releases, **relevant)
+    render_release_list(filtered, limit=100, empty_message="No releases match this command.")
 
 
 def tab_weekly_monitor(state):
@@ -218,7 +306,7 @@ def tab_macro_notes():
     blocks = extract_blocks(result.text, source_file=result.filename)
     for b in blocks:
         st.markdown(f"**{b.stem}**  scope `{b.region or '-'}`")
-        st.code(b.raw_text, language="text", wrap_lines=True)
+        st.code(b.raw_block if hasattr(b, "raw_block") else b.raw_text, language="text", wrap_lines=True)
 
 
 def tab_release_search(sidebar_state, command_state):
@@ -241,7 +329,7 @@ def tab_release_search(sidebar_state, command_state):
         min_importance=sidebar_state["min_importance"],
         themes=sidebar_state["themes"],
     )
-    merged.update({k: v for k, v in command_state.items() if v})
+    merged.update({k: v for k, v in command_state.items() if v and k != "_raw"})
 
     with st.container(border=True):
         cols = st.columns([3, 2, 1, 1])
@@ -342,9 +430,10 @@ def main():
     st.title("Macro FX Feed Dashboard")
     st.caption(
         "Structured macro terminal over the GitHub-hosted archive. "
-        "Sidebar scopes the view; the command bar below runs QUICK-style shortcuts."
+        "Sidebar scopes the view; the command bar runs QUICK-style shortcuts across all files."
     )
     command_state = command_bar()
+    render_command_results(command_state)
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "Weekly Monitor", "Macro Notes", "Release Search", "Inflation Monitor",
