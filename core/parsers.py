@@ -141,23 +141,47 @@ _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 
 
 def extract_releases(block):
+    """Split a block into releases.
+
+    A release starts at a paragraph containing an importance flag (* .. ****).
+    All subsequent paragraphs that do NOT themselves carry an importance flag are
+    attached to that release as commentary (Reuters Data, Economist Layer,
+    HF Take, Signal Tension Check, etc). The raw_block therefore preserves the
+    full content of the release, not just the header paragraph.
+    """
     if not block.raw_text:
         return []
     paragraphs = _PARAGRAPH_SPLIT.split(block.raw_text)
-    releases = []
-    region = block.region
-    kind = block.kind
+
+    groups = []
+    current = None
     for para in paragraphs:
         para = para.strip("\n")
         if not para.strip():
             continue
         flag = max_importance(para)
-        if flag is None:
-            continue
-        title = _first_meaningful_line(para)
-        date_str = first_date_string(para)
-        countries = detect_countries(para)
-        themes = detect_themes(para)
+        if flag is not None:
+            if current is not None:
+                groups.append(current)
+            current = [para]
+        else:
+            if current is not None:
+                current.append(para)
+
+    if current is not None:
+        groups.append(current)
+
+    releases = []
+    region = block.region
+    kind = block.kind
+    for group in groups:
+        header = group[0]
+        full_text = "\n\n".join(group)
+        flag = max_importance(header)
+        title = _first_meaningful_line(header)
+        date_str = first_date_string(full_text)
+        countries = detect_countries(full_text)
+        themes = detect_themes(full_text)
         releases.append(Release(
             source_file=block.source_file,
             block_stem=block.stem,
@@ -168,7 +192,7 @@ def extract_releases(block):
             date_str=date_str,
             countries=countries,
             themes=themes,
-            raw_block=collapse_blank_lines(para),
+            raw_block=collapse_blank_lines(full_text),
         ))
     return releases
 
