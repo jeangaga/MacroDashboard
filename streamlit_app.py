@@ -633,31 +633,41 @@ def tab_country_release_catalogue():
     if compare and len(rels) >= 2:
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(
-                f"**Latest** - {rels[0].date_str or 'no date'} - "
-                f"`{rels[0].importance or '?'}`"
-            )
-            st.caption(f"Original title: {rels[0].title}")
-            st.code(rels[0].raw_block, language="text", wrap_lines=True)
+            st.markdown(f"**Latest**  -  {rels[0].date_str or 'no date'}  -  `{rels[0].importance or '?'}`")
+            st.caption(f"Original title: {rels[0].title}  |  File: `{rels[0].source_file}`")
+            if rels[0].raw_block:
+                st.code(rels[0].raw_block, language="text", wrap_lines=True)
+            else:
+                st.warning("raw block unavailable")
         with c2:
-            st.markdown(
-                f"**Previous** - {rels[1].date_str or 'no date'} - "
-                f"`{rels[1].importance or '?'}`"
-            )
-            st.caption(f"Original title: {rels[1].title}")
-            st.code(rels[1].raw_block, language="text", wrap_lines=True)
+            st.markdown(f"**Previous**  -  {rels[1].date_str or 'no date'}  -  `{rels[1].importance or '?'}`")
+            st.caption(f"Original title: {rels[1].title}  |  File: `{rels[1].source_file}`")
+            if rels[1].raw_block:
+                st.code(rels[1].raw_block, language="text", wrap_lines=True)
+            else:
+                st.warning("raw block unavailable")
         if len(rels) > 2:
             st.markdown(f"**Earlier occurrences** ({len(rels) - 2})")
             for r in rels[2:]:
                 label = f"{r.date_str or 'no date'}  |  {r.importance or '?'}  |  {r.title}"
                 with st.expander(label, expanded=False):
-                    st.code(r.raw_block, language="text", wrap_lines=True)
+                    st.caption(f"File: `{r.source_file}`  |  Scope: `{r.region or '-'}`")
+                    if r.raw_block:
+                        st.code(r.raw_block, language="text", wrap_lines=True)
+                    else:
+                        st.warning("raw block unavailable")
         return
 
+    # Default layout: latest is a collapsed expander, identical format to previous
     latest = rels[0]
-    st.markdown(f"**Latest** - {latest.date_str or 'no date'} - `{latest.importance or '?'}`")
-    st.caption(f"Original title: {latest.title}  |  File: `{latest.source_file}`")
-    st.code(latest.raw_block, language="text", wrap_lines=True)
+    st.markdown("**Latest occurrence**")
+    latest_label = f"{latest.date_str or 'no date'}  |  {latest.importance or '?'}  |  {latest.title}"
+    with st.expander(latest_label, expanded=False):
+        st.caption(f"File: `{latest.source_file}`  |  Scope: `{latest.region or '-'}`")
+        if latest.raw_block:
+            st.code(latest.raw_block, language="text", wrap_lines=True)
+        else:
+            st.warning("raw block unavailable")
 
     if len(rels) > 1:
         st.markdown(f"**Previous occurrences** ({len(rels) - 1})")
@@ -665,7 +675,10 @@ def tab_country_release_catalogue():
             label = f"{r.date_str or 'no date'}  |  {r.importance or '?'}  |  {r.title}"
             with st.expander(label, expanded=False):
                 st.caption(f"File: `{r.source_file}`  |  Scope: `{r.region or '-'}`")
-                st.code(r.raw_block, language="text", wrap_lines=True)
+                if r.raw_block:
+                    st.code(r.raw_block, language="text", wrap_lines=True)
+                else:
+                    st.warning("raw block unavailable")
     else:
         st.caption("No previous occurrences in archive.")
 
