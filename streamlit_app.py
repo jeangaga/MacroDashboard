@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as _dt
 
+import pandas as pd
 import streamlit as st
 
 from core.config import (
@@ -21,6 +22,7 @@ from core.config import (
     SCOPE_GROUP,
 )
 from core.loaders import LoadResult, load_file, load_many
+from core.normalize import normalize_release_name
 from core.parsers import extract_blocks, releases_from_load_results
 from core.render import (
     importance_chip,
@@ -37,6 +39,7 @@ from core.search import (
     theme_releases,
     time_window_to_since,
 )
+from utils.text import parse_release_date
 
 st.set_page_config(
     page_title="Macro FX Feed Dashboard",
@@ -203,6 +206,14 @@ def command_bar():
         help_clicked = cols[2].button("?", use_container_width=True, help="Show command syntax", key="cmd_help")
         clear_clicked = cols[3].button("Clear", use_container_width=True, help="Clear active command", key="cmd_clear")
 
+        deep = st.checkbox(
+            "Search inside full raw text",
+            value=False,
+            key="cmd_deep_search",
+            help="Off (default): match keywords against title, country, theme, scope, and indicator only. "
+                 "On: also scan the full raw block (slower, more false positives).",
+        )
+
         if help_clicked:
             st.session_state["show_cmd_help"] = not st.session_state["show_cmd_help"]
         if clear_clicked:
@@ -213,8 +224,13 @@ def command_bar():
     if go and cmd.strip():
         parsed = parse_command(cmd)
         parsed["_raw"] = cmd.strip()
+        parsed["_deep_search"] = deep
         st.session_state["active_command"] = parsed
         return parsed
+    active = dict(st.session_state["active_command"])
+    if active:
+        active["_deep_search"] = deep
+        st.session_state["active_command"] = active
     return st.session_state["active_command"]
 
 
@@ -254,11 +270,11 @@ def render_command_results(command_state, sidebar_state):
     all_results = _load_many(ALL_NOTE_FILES)
     all_releases = releases_from_load_results(all_results)
 
-    # If command didn't set a min_importance, layer the sidebar's `levels` on top.
     extra = {}
     if "min_importance" not in relevant and sidebar_state.get("levels"):
         extra["levels"] = sidebar_state["levels"]
     extra["since"] = time_window_to_since(sidebar_state.get("time_window"))
+    extra["deep_search"] = bool(command_state.get("_deep_search"))
 
     filtered = filter_releases(all_releases, **relevant, **extra)
     render_release_list(filtered, limit=100, empty_message="No releases match this command.")
@@ -289,12 +305,8 @@ def tab_weekly_monitor(state):
 
     blocks = extract_blocks(result.text, source_file=result.filename)
     scope_blocks = [b for b in blocks if b.region == scope] or blocks
-    # Map sidebar `levels` to a min_importance for the per-block renderer.
-    # If the user picked a non-contiguous set, the renderer will still cut by
-    # the lowest level; the inline filter on full archive is exact.
     min_importance = None
     if levels:
-        # min_importance = the smallest selected level
         min_importance = min(levels, key=len)
     for b in scope_blocks:
         render_block(b, min_importance=min_importance)
@@ -348,7 +360,6 @@ def tab_release_search(sidebar_state, command_state):
     seeded_themes = command_state.get("themes", sidebar_state["themes"]) or sidebar_state["themes"]
     seeded_levels = sidebar_state["levels"]
     if command_state.get("min_importance"):
-        # promote 'min_importance' from command to a level set: that level and above
         target = command_state["min_importance"]
         order = ["*", "**", "***", "****"]
         seeded_levels = [x for x in order if len(x) >= len(target)]
@@ -380,7 +391,6 @@ def tab_release_search(sidebar_state, command_state):
                   if sidebar_state["time_window"] in TIME_WINDOWS else 0,
             key="rs_window",
         )
-        # Release-type dropdown is built from the current scope/country selection
         rtype_universe = release_types_for(all_releases, scopes=scope_filter or None)
         rtypes_filter = cols2[2].multiselect(
             "Release type", options=rtype_universe, default=[],
@@ -391,8 +401,16 @@ def tab_release_search(sidebar_state, command_state):
     countries_options = sorted({
         c for s in (scope_filter or ALL_SCOPES) for c in SCOPE_COUNTRIES.get(s, [])
     })
-    countries_filter = st.multiselect(
+    cols3 = st.columns([3, 2])
+    countries_filter = cols3[0].multiselect(
         "Countries", options=countries_options, default=[], key="rs_countries",
+    )
+    deep_search = cols3[1].checkbox(
+        "Search inside full raw text",
+        value=False,
+        key="rs_deep_search",
+        help="Off (default): keyword matches title, country, theme, scope, and indicator only. "
+             "On: also scan the full raw block.",
     )
 
     since = time_window_to_since(time_window_filter)
@@ -406,6 +424,7 @@ def tab_release_search(sidebar_state, command_state):
         countries=countries_filter,
         release_types=rtypes_filter,
         since=since,
+        deep_search=deep_search,
     )
 
     st.divider()
@@ -488,6 +507,169 @@ def tab_theme_monitor(sidebar_state):
     render_release_list(filtered, limit=200)
 
 
+_CONFIDENCE_ICON = {"High": "H", "Medium": "M", "Low": "L"}
+_CATALOGUE_THEMES = ["Inflation", "Labor", "Growth", "Policy", "External", "Housing"]
+
+
+def _release_sort_key(r):
+    d = parse_release_date(r.date_str) or parse_release_date(r.raw_block)
+    return d or _dt.date.min
+
+
+def tab_country_release_catalogue():
+    """Per-country index of recurring releases. Click a row to see latest +
+    previous occurrences, with optional latest-vs-previous compare."""
+    st.header("Country Release Catalogue")
+    st.caption(
+        "For each country, list every recurring macro release in the archive. "
+        "Click a row to open the latest occurrence and compare with previous prints."
+    )
+
+    all_results = _load_many(ALL_NOTE_FILES)
+    render_load_status(all_results)
+    all_releases = releases_from_load_results(all_results)
+    if not all_releases:
+        st.info("No releases parsed yet.")
+        return
+
+    countries = sorted({c for r in all_releases for c in (r.countries or [])})
+    if not countries:
+        st.info("No country-tagged releases found in the archive.")
+        return
+
+    cols = st.columns([2, 2, 3])
+    country = cols[0].selectbox("Country", options=countries, key="cc_country")
+    theme_filter = cols[1].multiselect(
+        "Theme", options=_CATALOGUE_THEMES, default=[], key="cc_themes",
+        help="Filter the catalogue to one or more themes.",
+    )
+    name_query = cols[2].text_input(
+        "Search release name", value="",
+        placeholder="cpi | labour | retail | central bank",
+        key="cc_search",
+    )
+
+    country_releases = [r for r in all_releases if country in (r.countries or [])]
+    if not country_releases:
+        st.info(f"No releases tagged with {country}.")
+        return
+
+    groups = {}
+    meta = {}
+    for r in country_releases:
+        name, theme, conf = normalize_release_name(r.title)
+        if not name:
+            continue
+        if theme_filter and theme not in theme_filter:
+            continue
+        if name_query and name_query.strip().lower() not in name.lower():
+            continue
+        groups.setdefault(name, []).append(r)
+        if name not in meta:
+            meta[name] = (theme, conf)
+
+    if not groups:
+        st.info("No recurring releases match these filters.")
+        return
+
+    rows = []
+    for name, rels in groups.items():
+        rels_sorted = sorted(rels, key=_release_sort_key, reverse=True)
+        latest = rels_sorted[0]
+        regions = sorted({(r.region or "-") for r in rels})
+        files = sorted({r.source_file for r in rels})
+        theme, conf = meta[name]
+        rows.append({
+            "Release": name,
+            "Theme": theme or "-",
+            "Conf": _CONFIDENCE_ICON.get(conf, conf),
+            "Occurrences": len(rels),
+            "Latest date": latest.date_str or "-",
+            "Imp": latest.importance or "-",
+            "Regions": ", ".join(regions),
+            "Files": ", ".join(files),
+        })
+    rows.sort(key=lambda x: (-x["Occurrences"], x["Release"].lower()))
+
+    df = pd.DataFrame(rows)
+    st.caption(f"{len(rows)} recurring release(s) for {country}.")
+    selection = st.dataframe(
+        df,
+        use_container_width=True,
+        height=min(420, 60 + 36 * max(len(rows), 1)),
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="cc_table",
+    )
+
+    selected_idx = []
+    sel = getattr(selection, "selection", None)
+    if sel is not None:
+        selected_idx = list(getattr(sel, "rows", []) or [])
+
+    if not selected_idx:
+        st.caption("Select a row above to see latest + previous occurrences.")
+        return
+
+    selected_name = rows[selected_idx[0]]["Release"]
+    rels = sorted(groups[selected_name], key=_release_sort_key, reverse=True)
+
+    st.divider()
+    theme, conf = meta[selected_name]
+    st.subheader(f"{country}  -  {selected_name}")
+    st.caption(
+        f"Theme: `{theme or '-'}`  |  Confidence: `{conf}`  |  "
+        f"Occurrences in archive: `{len(rels)}`"
+    )
+
+    compare = st.checkbox(
+        "Compare latest vs previous side-by-side",
+        value=False, key="cc_compare",
+        disabled=(len(rels) < 2),
+        help="Disabled when only one occurrence is available.",
+    )
+
+    if compare and len(rels) >= 2:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(
+                f"**Latest** - {rels[0].date_str or 'no date'} - "
+                f"`{rels[0].importance or '?'}`"
+            )
+            st.caption(f"Original title: {rels[0].title}")
+            st.code(rels[0].raw_block, language="text", wrap_lines=True)
+        with c2:
+            st.markdown(
+                f"**Previous** - {rels[1].date_str or 'no date'} - "
+                f"`{rels[1].importance or '?'}`"
+            )
+            st.caption(f"Original title: {rels[1].title}")
+            st.code(rels[1].raw_block, language="text", wrap_lines=True)
+        if len(rels) > 2:
+            st.markdown(f"**Earlier occurrences** ({len(rels) - 2})")
+            for r in rels[2:]:
+                label = f"{r.date_str or 'no date'}  |  {r.importance or '?'}  |  {r.title}"
+                with st.expander(label, expanded=False):
+                    st.code(r.raw_block, language="text", wrap_lines=True)
+        return
+
+    latest = rels[0]
+    st.markdown(f"**Latest** - {latest.date_str or 'no date'} - `{latest.importance or '?'}`")
+    st.caption(f"Original title: {latest.title}  |  File: `{latest.source_file}`")
+    st.code(latest.raw_block, language="text", wrap_lines=True)
+
+    if len(rels) > 1:
+        st.markdown(f"**Previous occurrences** ({len(rels) - 1})")
+        for r in rels[1:]:
+            label = f"{r.date_str or 'no date'}  |  {r.importance or '?'}  |  {r.title}"
+            with st.expander(label, expanded=False):
+                st.caption(f"File: `{r.source_file}`  |  Scope: `{r.region or '-'}`")
+                st.code(r.raw_block, language="text", wrap_lines=True)
+    else:
+        st.caption("No previous occurrences in archive.")
+
+
 def main():
     state = sidebar()
     st.title("Macro FX Feed Dashboard")
@@ -498,8 +680,9 @@ def main():
     command_state = command_bar()
     render_command_results(command_state, state)
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Weekly Monitor", "Macro Notes", "Release Search", "Theme Monitor",
+        "Country Release Catalogue",
     ])
     with tab1:
         tab_weekly_monitor(state)
@@ -509,6 +692,8 @@ def main():
         tab_release_search(state, command_state)
     with tab4:
         tab_theme_monitor(state)
+    with tab5:
+        tab_country_release_catalogue()
 
 
 if __name__ == "__main__":
