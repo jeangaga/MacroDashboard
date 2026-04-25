@@ -48,6 +48,26 @@ def detect_countries(text):
     return matches
 
 
+def country_from_title(title):
+    """Tighter country detection: scan only the title/header line.
+
+    Avoids the false positives we get when scanning a release's full raw_block
+    (e.g. a US CPI commentary that mentions "Turkey" once would otherwise tag
+    the release with `Turkey`).
+
+    Returns at most one country - the first alias that hits in the title.
+    """
+    if not title:
+        return []
+    line = title.strip().splitlines()[0]
+    lower = line.lower()
+    for country, aliases in COUNTRY_ALIASES.items():
+        for alias in aliases:
+            if alias.lower() in lower:
+                return [country]
+    return []
+
+
 def detect_themes(text):
     if not text:
         return []
