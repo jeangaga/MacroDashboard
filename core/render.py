@@ -66,14 +66,16 @@ def render_release_card(release, *, default_expanded=False):
     Header: title  ·  ****  ·  date  ·  country (if any)
     Body (when expanded): scope/file/themes meta + the full raw block.
     """
-    title_bits = [release.title or "(untitled release)"]
-    if release.importance:
-        title_bits.append(release.importance)
-    if release.date_str:
-        title_bits.append(release.date_str)
-    if release.countries:
-        title_bits.append(", ".join(release.countries))
-    label = "   |   ".join(title_bits)
+    # Header format: "[date] | [importance] | [country] - [title]"
+    date_part = release.date_str or "no date"
+    imp_part = release.importance or "?"
+    country_part = ", ".join(release.countries) if release.countries else ""
+    title_part = release.title or "(untitled release)"
+    if country_part and country_part.lower() not in title_part.lower():
+        tail = f"{country_part} - {title_part}"
+    else:
+        tail = title_part
+    label = f"{date_part}  |  {imp_part}  |  {tail}"
 
     with st.expander(label, expanded=default_expanded):
         meta_cols = st.columns(3)

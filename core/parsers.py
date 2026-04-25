@@ -28,6 +28,9 @@ class Block:
     stem: str
     source_file: str
     raw_text: str
+    data_window: Optional[str] = None
+    data_window_start: Optional[str] = None
+    data_window_end: Optional[str] = None
 
     @property
     def region(self) -> str:
@@ -96,7 +99,14 @@ def _marker_regex(stem):
     return re.compile(begin + r"\s*(.*?)\s*" + end, re.DOTALL)
 
 
-def extract_blocks(text: str, source_file: str):
+def extract_blocks(text: str, source_file: str, *, split_weekly=True):
+    """Split a file's text into Blocks.
+
+    First pass uses the <<STEM_BEGIN>>/<<STEM_END>> markers. If `split_weekly`
+    is True, each block that contains "Data window: ..." headers is further
+    split into one sub-block per window (so a USD_WEEK file holding several
+    weeks renders as one card per week).
+    """
     if not text:
         return []
     blocks = []
@@ -106,10 +116,15 @@ def extract_blocks(text: str, source_file: str):
             inner = m.group(1)
             if inner.strip():
                 blocks.append(Block(stem=stem, source_file=source_file, raw_text=inner))
-    if blocks:
+    if not blocks:
+        stem = _stem_from_filename(source_file)
+        blocks = [Block(stem=stem, source_file=source_file, raw_text=text)]
+    if not split_weekly:
         return blocks
-    stem = _stem_from_filename(source_file)
-    return [Block(stem=stem, source_file=source_file, raw_text=text)]
+    expanded = []
+    for b in blocks:
+        expanded.extend(split_block_by_data_window(b))
+    return expanded
 
 
 def _stem_from_filename(filename: str) -> str:
@@ -139,6 +154,112 @@ class Release:
 
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 
+# Day-of-week banners we want to strip (e.g. "MONDAY 13 APR 2026" or
+# "TUESDAY 06 JAN 2026 - RELEASED"). They are section dividers, not releases.
+_DAY_HEADER_RE = re.compile(
+    r"^\s*(?:MON|TUE|WED|THU|FRI|SAT|SUN)[A-Z]*DAY\s+"
+    r"\d{1,2}\s+"
+    r"[A-Z]{3,9}\s+"
+    r"\d{4}"
+    r"(?:\s*[-\u2013\u2014]\s*RELEASED)?\s*$",
+    re.I,
+)
+
+# A "Data window: <start> to <end>" header.
+_DATA_WINDOW_RE = re.compile(
+    r"(?im)^[ \t]*data[ \t]*window[ \t]*[:\u2013\u2014-][ \t]*"
+    r"(.+?)\s+(?:to|\u2013|\u2014|-)\s+(.+?)[ \t]*$"
+)
+
+# Lines that prove this paragraph carries real release content.
+_RELEASE_FIELD_RE = re.compile(
+    r"(?im)^\s*(?:release\s+date|importance|reuters\s+data|actual|prior|previous|consensus|poll|forecast)\s*[:\u2013\u2014-]",
+)
+
+# Country-prefixed title pattern: "United States - CPI", "US - Retail Sales".
+_TITLE_DASH_RE = re.compile(r"\S\s+[-\u2013\u2014]+\s+\S")
+
+
+def _is_day_header_line(line):
+    return bool(_DAY_HEADER_RE.match((line or "").strip()))
+
+
+def _is_day_header_paragraph(paragraph):
+    if not paragraph:
+        return False
+    meaningful = [ln.strip() for ln in paragraph.splitlines() if ln.strip()]
+    if not meaningful:
+        return False
+    return all(_is_day_header_line(ln) for ln in meaningful)
+
+
+def _strip_day_header_lines(paragraph):
+    if not paragraph:
+        return paragraph
+    kept = [ln for ln in paragraph.splitlines() if not _is_day_header_line(ln)]
+    return "\n".join(kept).strip("\n")
+
+
+def _has_release_signals(text):
+    """True iff `text` contains at least one structured release field
+    (Release Date, Importance, Actual, Prior, Reuters Data, etc.) OR a
+    country-prefixed dashed title."""
+    if not text:
+        return False
+    if _RELEASE_FIELD_RE.search(text):
+        return True
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _is_day_header_line(line):
+            continue
+        if _TITLE_DASH_RE.search(line) and country_from_title(line):
+            return True
+        break
+    return False
+
+
+def find_data_windows(text):
+    """Return list of (label, start, end, match_start, match_end) tuples for
+    each "Data window: X to Y" header in `text`, in document order."""
+    if not text:
+        return []
+    out = []
+    for m in _DATA_WINDOW_RE.finditer(text):
+        start = m.group(1).strip().rstrip(",;.")
+        end = m.group(2).strip().rstrip(",;.")
+        label = f"{start} to {end}"
+        out.append((label, start, end, m.start(), m.end()))
+    return out
+
+
+def split_block_by_data_window(block):
+    """If `block.raw_text` contains "Data window:" markers, split into one
+    Block per window. Otherwise return [block] unchanged."""
+    if not block or not block.raw_text:
+        return [block]
+    windows = find_data_windows(block.raw_text)
+    if not windows:
+        return [block]
+    out = []
+    for i, (label, start, end, ms, me) in enumerate(windows):
+        seg_start = ms
+        seg_end = windows[i + 1][3] if i + 1 < len(windows) else len(block.raw_text)
+        chunk = block.raw_text[seg_start:seg_end].strip()
+        if not chunk:
+            continue
+        out.append(Block(
+            stem=block.stem,
+            source_file=block.source_file,
+            raw_text=chunk,
+            data_window=label,
+            data_window_start=start,
+            data_window_end=end,
+        ))
+    return out or [block]
+
+
 # Lines we never want to use as a release title.
 _TITLE_SKIP_PREFIXES = (
     "release date",
@@ -151,13 +272,15 @@ _TITLE_SKIP_PREFIXES = (
     "consensus",
     "previous",
     "actual",
+    "data window",
 )
 
 
 def _looks_like_title_line(line):
-    """Heuristic: is this an actual heading rather than a metadata key?"""
     s = (line or "").strip()
     if not s:
+        return False
+    if _is_day_header_line(s):
         return False
     low = s.lower()
     for p in _TITLE_SKIP_PREFIXES:
@@ -169,8 +292,6 @@ def _looks_like_title_line(line):
 
 
 def _looks_like_preamble(paragraph):
-    """A short un-flagged paragraph that should be promoted to title for the
-    next group."""
     if not paragraph:
         return False
     line = ""
@@ -193,12 +314,12 @@ def extract_releases(block):
     A release starts at a paragraph containing an importance flag.
     All subsequent un-flagged paragraphs are commentary.
 
-    Special case: a short un-flagged paragraph that immediately PRECEDES a
-    flagged paragraph is treated as the actual release TITLE (e.g. PM-style
-    layout where the title sits one paragraph above the 'Release Date: ...'
-    metadata block).
+    Day headers ("MONDAY 13 APR 2026") are stripped before grouping so they
+    never become release titles. Groups without any structured release signal
+    (Release Date / Importance / Actual / Prior / country-dash title) are
+    discarded.
     """
-    if not block.raw_text:
+    if not block or not block.raw_text:
         return []
     paragraphs = _PARAGRAPH_SPLIT.split(block.raw_text)
 
@@ -210,10 +331,18 @@ def extract_releases(block):
         para = para.strip("\n")
         if not para.strip():
             continue
+        # Drop pure day-header paragraphs entirely.
+        if _is_day_header_paragraph(para):
+            continue
+        # If a paragraph mixes a day banner with real content, peel the
+        # banner off and keep the rest.
+        if any(_is_day_header_line(ln) for ln in para.splitlines()):
+            stripped = _strip_day_header_lines(para)
+            if not stripped.strip():
+                continue
+            para = stripped
         flag = max_importance(para)
         if flag is not None:
-            # If the last paragraph appended to `current` is a preamble for
-            # THIS new release, peel it off the prior group.
             promoted = None
             if (
                 current is not None
@@ -259,6 +388,10 @@ def extract_releases(block):
         flag = max_importance(header_for_flag)
         full_text = "\n\n".join(group)
 
+        # Real release blocks must have at least one structured signal.
+        if not _has_release_signals(full_text):
+            continue
+
         title = _best_title_line(title_source)
         if not title:
             for para in group:
@@ -266,6 +399,9 @@ def extract_releases(block):
                 if cand:
                     title = cand
                     break
+
+        if title and _is_day_header_line(title):
+            continue
 
         date_str = first_date_string(full_text)
         countries = country_from_title(title)
@@ -286,7 +422,6 @@ def extract_releases(block):
 
 
 def _best_title_line(paragraph):
-    """First line of `paragraph` that doesn't look like metadata."""
     if not paragraph:
         return ""
     for raw in paragraph.splitlines():
@@ -310,6 +445,32 @@ def _clean_title(title):
     t = re.sub(r"\s*\|\s*\*{1,4}\s*$", "", title or "").strip()
     t = re.sub(r"\s*\*{1,4}\s*$", "", t).strip()
     return t[:180]
+
+
+def block_data_window(block):
+    """Return (label, start_date, end_date) for a block.
+
+    Prefers the explicit "Data window:" header. If none, infers from the
+    earliest/latest parsed release dates inside the block. Returns
+    (label, None, None) when nothing is available.
+    """
+    from utils.text import parse_release_date
+
+    if block is None:
+        return ("", None, None)
+    if block.data_window:
+        s = parse_release_date(block.data_window_start) if block.data_window_start else None
+        e = parse_release_date(block.data_window_end) if block.data_window_end else None
+        return (block.data_window, s, e)
+    rels = extract_releases(block)
+    dates = [parse_release_date(r.date_str) for r in rels if r.date_str]
+    dates = [d for d in dates if d is not None]
+    if not dates:
+        return ("", None, None)
+    s = min(dates)
+    e = max(dates)
+    label = f"{s.strftime('%d %b %Y')} to {e.strftime('%d %b %Y')}"
+    return (label, s, e)
 
 
 def blocks_from_load_results(results):
