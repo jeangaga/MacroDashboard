@@ -144,3 +144,34 @@ def is_known(title) -> bool:
     """True if normalize_release_name returns a High/Medium-confidence match."""
     _, _, conf = normalize_release_name(title)
     return conf in {"High", "Medium"}
+
+
+def release_key(release) -> str:
+    """Stable dedup key: country | normalized_name | date | importance.
+
+    Two release blocks parsed from different parts of the same archive
+    that describe the same Reuters event will produce the same key, even
+    if the surrounding commentary differs.
+    """
+    if release is None:
+        return ""
+    country = ""
+    if getattr(release, "countries", None):
+        country = release.countries[0] or ""
+    name, _theme, _conf = normalize_release_name(getattr(release, "title", "") or "")
+    date = getattr(release, "date_str", "") or ""
+    importance = getattr(release, "importance", "") or ""
+    return f"{country}|{name}|{date}|{importance}"
+
+
+def dedup_releases(releases):
+    """Drop duplicates on release_key, keeping the FIRST occurrence."""
+    seen = set()
+    out = []
+    for r in releases or []:
+        k = release_key(r)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return out
