@@ -1,9 +1,7 @@
-"""Macro FX Feed Dashboard - Streamlit entry point.
-
-Run:
-    streamlit run streamlit_app.py
-"""
+"""Macro FX Feed Dashboard - Streamlit entry point."""
 from __future__ import annotations
+
+import datetime as _dt
 
 import streamlit as st
 
@@ -33,9 +31,11 @@ from core.render import (
 )
 from core.search import (
     filter_releases,
-    inflation_releases,
     parse_command,
+    release_types_for,
     releases_to_dataframe,
+    theme_releases,
+    time_window_to_since,
 )
 
 st.set_page_config(
@@ -43,6 +43,9 @@ st.set_page_config(
     page_icon=":chart_with_upwards_trend:",
     layout="wide",
 )
+
+IMPORTANCE_LEVELS_UI = ["*", "**", "***", "****"]
+TIME_WINDOWS = ["All", "Last 4 weeks", "Last 3 months", "Last 6 months", "Last 12 months", "YTD"]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -95,6 +98,7 @@ def sidebar():
         "Group",
         options=["Region", "DM currency", "EM currency", "PM / shared"],
         index=0, horizontal=True, label_visibility="collapsed",
+        key="sb_group",
     )
     group_options = {
         "Region":       REGION_SCOPES,
@@ -102,7 +106,10 @@ def sidebar():
         "EM currency":  CURRENCY_SCOPES_EM,
         "PM / shared":  PM_SCOPES,
     }[group]
-    scope = st.sidebar.selectbox("Scope", options=group_options, index=0, label_visibility="collapsed")
+    scope = st.sidebar.selectbox(
+        "Scope", options=group_options, index=0, label_visibility="collapsed",
+        key="sb_scope",
+    )
 
     st.sidebar.subheader("View")
     views = _available_views(scope)
@@ -112,6 +119,7 @@ def sidebar():
             "View", options=list(range(len(views))),
             format_func=lambda i: view_labels[i],
             label_visibility="collapsed",
+            key="sb_view",
         )
         view = views[view_idx][0]
     else:
@@ -119,20 +127,31 @@ def sidebar():
         st.sidebar.caption("No views available for this scope.")
 
     st.sidebar.subheader("Importance")
-    importance_choice = st.sidebar.radio(
-        "Importance",
-        options=["All", "*** + ****", "**** only"],
-        index=1, label_visibility="collapsed",
+    levels = st.sidebar.multiselect(
+        "Importance levels",
+        options=IMPORTANCE_LEVELS_UI,
+        default=["***", "****"],
+        label_visibility="collapsed",
+        key="sb_levels",
+        help="Pick any combination of importance levels (* through ****).",
     )
-    min_importance = {"All": None, "*** + ****": "***", "**** only": "****"}[importance_choice]
 
     st.sidebar.subheader("Themes")
     themes = st.sidebar.multiselect(
         "Themes", options=ALL_THEMES, default=[], label_visibility="collapsed",
+        key="sb_themes",
+    )
+
+    st.sidebar.subheader("Time window")
+    time_window = st.sidebar.selectbox(
+        "Time window",
+        options=TIME_WINDOWS, index=0, label_visibility="collapsed",
+        key="sb_time_window",
+        help="Filter Release Search and Theme Monitor to this window.",
     )
 
     st.sidebar.divider()
-    if st.sidebar.button("Refresh from GitHub", use_container_width=True):
+    if st.sidebar.button("Refresh from GitHub", use_container_width=True, key="sb_refresh"):
         st.session_state["refresh_token"] = _refresh_token() + 1
         st.cache_data.clear()
         st.rerun()
@@ -141,15 +160,16 @@ def sidebar():
     return {
         "scope": scope,
         "view": view,
-        "min_importance": min_importance,
+        "levels": levels,
         "themes": themes,
+        "time_window": time_window,
     }
 
 
 _CMD_HELP = """
-**Command syntax** — type any combination, order doesn't matter.
+**Command syntax** - any combination, order doesn't matter.
 
-| What you type | Effect |
+| Type | Effect |
 |---|---|
 | `CPI US` | Keyword `CPI`, scope `USD` |
 | `CPI Australia` | Keyword `CPI`, scope `AUD` |
@@ -158,21 +178,11 @@ _CMD_HELP = """
 | `QUICK EUR` | All `***+` releases for EUR |
 | `QUICK2US` | All `****` releases for USD |
 | `labor Japan` | Theme `Labor`, scope `JPY` |
-| `retail UK CPI` | Keyword `retail CPI`, scope `GBP` |
 
-**Scopes** — regions: `USD EUR DM EM`;
-DM currencies: `AUD CAD CHF GBP JPY NOK SEK`;
-EM currencies: `BRL CNH INR KRW MXN PLN TRY TWD ZAR`;
-PM files: `WEEKPM MACROPM SHORT_WEEK ARC`.
+**Aliases** - `US`=`USD`, `UK`=`GBP`, `EU`=`EUR`, `Japan`=`JPY`, `China`=`CNH`,
+`Brazil`=`BRL`, `Australia`=`AUD`, etc.
 
-**Aliases** — `US` = `USD`, `UK` = `GBP`, `EU` = `EUR`, `Japan` = `JPY`,
-`China` = `CNH`, `Brazil` = `BRL`, `Australia` = `AUD`, etc.
-
-**Importance** — `*` through `****` sets the minimum stars.
-
-**Themes** — any theme name from the sidebar list.
-
-Everything else becomes a free-text keyword search over title + body.
+Sidebar `Importance` and `Time window` ALSO apply to command results.
 """.strip()
 
 
@@ -185,14 +195,13 @@ def command_bar():
     with st.container(border=True):
         cols = st.columns([6, 1, 1, 1])
         cmd = cols[0].text_input(
-            "Command",
-            value="",
-            label_visibility="collapsed",
+            "Command", value="", label_visibility="collapsed",
             placeholder="CPI US  |  **** inflation EM  |  QUICK EUR  |  labor Japan",
+            key="cmd_input",
         )
-        go = cols[1].button("Run", use_container_width=True)
-        help_clicked = cols[2].button("?", use_container_width=True, help="Show command syntax")
-        clear_clicked = cols[3].button("Clear", use_container_width=True, help="Clear active command")
+        go = cols[1].button("Run", use_container_width=True, key="cmd_run")
+        help_clicked = cols[2].button("?", use_container_width=True, help="Show command syntax", key="cmd_help")
+        clear_clicked = cols[3].button("Clear", use_container_width=True, help="Clear active command", key="cmd_clear")
 
         if help_clicked:
             st.session_state["show_cmd_help"] = not st.session_state["show_cmd_help"]
@@ -209,7 +218,7 @@ def command_bar():
     return st.session_state["active_command"]
 
 
-def _command_summary(cmd):
+def _command_summary(cmd, sidebar_state):
     if not cmd:
         return ""
     bits = []
@@ -217,48 +226,54 @@ def _command_summary(cmd):
         bits.append("scopes=" + ",".join(cmd["regions"]))
     if cmd.get("min_importance"):
         bits.append("importance>=" + cmd["min_importance"])
+    elif sidebar_state.get("levels"):
+        bits.append("levels=" + "/".join(sidebar_state["levels"]))
     if cmd.get("themes"):
         bits.append("themes=" + ",".join(cmd["themes"]))
     if cmd.get("query"):
         bits.append("query=" + repr(cmd["query"]))
+    if sidebar_state.get("time_window") and sidebar_state["time_window"] != "All":
+        bits.append("window=" + sidebar_state["time_window"])
     return "  |  ".join(bits) if bits else "(no filters parsed)"
 
 
-def render_command_results(command_state):
+def render_command_results(command_state, sidebar_state):
     if not command_state:
         return
-    # filter-relevant keys only
-    relevant = {k: v for k, v in command_state.items() if k in {"query", "regions", "min_importance", "themes"} and v}
+    relevant = {k: v for k, v in command_state.items()
+                if k in {"query", "regions", "min_importance", "themes"} and v}
     if not relevant:
-        st.info(
-            "Command parsed but produced no filters. "
-            "Try something like `CPI US` or `**** inflation EM`."
-        )
+        st.info("Command parsed but produced no filters. Try `CPI US` or `**** inflation EM`.")
         return
 
     st.divider()
-    hdr_cols = st.columns([4, 1])
     raw = command_state.get("_raw", "")
-    hdr_cols[0].subheader(f"Command results: `{raw}`")
-    hdr_cols[0].caption(_command_summary(command_state))
-    hdr_cols[1].caption("Filters apply across the whole archive.")
+    st.subheader(f"Command results: `{raw}`")
+    st.caption(_command_summary(command_state, sidebar_state))
 
     all_results = _load_many(ALL_NOTE_FILES)
     all_releases = releases_from_load_results(all_results)
-    filtered = filter_releases(all_releases, **relevant)
+
+    # If command didn't set a min_importance, layer the sidebar's `levels` on top.
+    extra = {}
+    if "min_importance" not in relevant and sidebar_state.get("levels"):
+        extra["levels"] = sidebar_state["levels"]
+    extra["since"] = time_window_to_since(sidebar_state.get("time_window"))
+
+    filtered = filter_releases(all_releases, **relevant, **extra)
     render_release_list(filtered, limit=100, empty_message="No releases match this command.")
 
 
 def tab_weekly_monitor(state):
     scope = state["scope"]
     view = state["view"]
-    min_importance = state["min_importance"]
+    levels = state["levels"]
     scope_file = SCOPE_FILES.get(scope, {}).get(view, "")
 
-    header_cols = st.columns([3, 1])
+    header_cols = st.columns([3, 2])
     header_cols[0].header(f"{scope} - {_view_display(view)}")
-    if min_importance:
-        header_cols[1].metric("Importance filter", importance_chip(min_importance))
+    if levels:
+        header_cols[1].caption("Importance: " + " ".join(levels))
 
     if not scope_file:
         st.warning(f"No `{_view_display(view)}` file configured for `{scope}`.")
@@ -274,6 +289,13 @@ def tab_weekly_monitor(state):
 
     blocks = extract_blocks(result.text, source_file=result.filename)
     scope_blocks = [b for b in blocks if b.region == scope] or blocks
+    # Map sidebar `levels` to a min_importance for the per-block renderer.
+    # If the user picked a non-contiguous set, the renderer will still cut by
+    # the lowest level; the inline filter on full archive is exact.
+    min_importance = None
+    if levels:
+        # min_importance = the smallest selected level
+        min_importance = min(levels, key=len)
     for b in scope_blocks:
         render_block(b, min_importance=min_importance)
 
@@ -294,6 +316,7 @@ def tab_macro_notes():
         "Select a macro note",
         options=list(range(len(note_options))),
         format_func=lambda i: labels[i],
+        key="mn_select",
     )
     scope, filename = note_options[idx]
     result = _load_file(filename)
@@ -306,7 +329,7 @@ def tab_macro_notes():
     blocks = extract_blocks(result.text, source_file=result.filename)
     for b in blocks:
         st.markdown(f"**{b.stem}**  scope `{b.region or '-'}`")
-        st.code(b.raw_block if hasattr(b, "raw_block") else b.raw_text, language="text", wrap_lines=True)
+        st.code(b.raw_text, language="text", wrap_lines=True)
 
 
 def tab_release_search(sidebar_state, command_state):
@@ -316,86 +339,104 @@ def tab_release_search(sidebar_state, command_state):
     all_releases = releases_from_load_results(all_results)
 
     if not all_releases:
-        st.info(
-            "No releases parsed yet. Either the repo files are empty, no markers are "
-            "present, or GitHub is unreachable and there's no cache."
-        )
+        st.info("No releases parsed yet.")
         return
 
     default_scopes = [sidebar_state["scope"]] if sidebar_state["scope"] else []
-    merged = dict(
-        query="",
-        regions=default_scopes,
-        min_importance=sidebar_state["min_importance"],
-        themes=sidebar_state["themes"],
-    )
-    merged.update({k: v for k, v in command_state.items() if v and k != "_raw"})
+    seeded_query = command_state.get("query", "")
+    seeded_regions = command_state.get("regions", default_scopes) or default_scopes
+    seeded_themes = command_state.get("themes", sidebar_state["themes"]) or sidebar_state["themes"]
+    seeded_levels = sidebar_state["levels"]
+    if command_state.get("min_importance"):
+        # promote 'min_importance' from command to a level set: that level and above
+        target = command_state["min_importance"]
+        order = ["*", "**", "***", "****"]
+        seeded_levels = [x for x in order if len(x) >= len(target)]
 
     with st.container(border=True):
-        cols = st.columns([3, 2, 1, 1])
+        cols = st.columns([3, 2, 2])
         query = cols[0].text_input(
-            "Keyword search", value=merged.get("query", ""),
+            "Keyword search", value=seeded_query,
             placeholder="Australia CPI | labor US | RBA minutes",
+            key="rs_query",
         )
         scope_filter = cols[1].multiselect(
-            "Scopes", options=ALL_SCOPES,
-            default=merged.get("regions", []),
-            format_func=_scope_label,
+            "Scopes", options=ALL_SCOPES, default=seeded_regions,
+            format_func=_scope_label, key="rs_scopes",
         )
-        importance_options = ["Any", "*", "**", "***", "****"]
-        default_importance = merged.get("min_importance")
-        importance_idx = (
-            importance_options.index(default_importance)
-            if default_importance in importance_options[1:] else 0
-        )
-        importance_filter = cols[2].selectbox(
-            "Min importance", options=importance_options, index=importance_idx,
-        )
-        themes_filter = cols[3].multiselect(
-            "Themes", options=ALL_THEMES, default=merged.get("themes", []),
+        themes_filter = cols[2].multiselect(
+            "Themes", options=ALL_THEMES, default=seeded_themes,
+            key="rs_themes",
         )
 
-    min_imp = None if importance_filter == "Any" else importance_filter
+        cols2 = st.columns([2, 2, 2])
+        levels_filter = cols2[0].multiselect(
+            "Importance levels", options=IMPORTANCE_LEVELS_UI, default=seeded_levels,
+            key="rs_levels",
+        )
+        time_window_filter = cols2[1].selectbox(
+            "Time window", options=TIME_WINDOWS,
+            index=TIME_WINDOWS.index(sidebar_state["time_window"])
+                  if sidebar_state["time_window"] in TIME_WINDOWS else 0,
+            key="rs_window",
+        )
+        # Release-type dropdown is built from the current scope/country selection
+        rtype_universe = release_types_for(all_releases, scopes=scope_filter or None)
+        rtypes_filter = cols2[2].multiselect(
+            "Release type", options=rtype_universe, default=[],
+            key="rs_rtypes",
+            help="Pick CPI / NFIB / Retail Sales etc. to see all historical instances.",
+        )
+
     countries_options = sorted({
         c for s in (scope_filter or ALL_SCOPES) for c in SCOPE_COUNTRIES.get(s, [])
     })
-    countries_filter = st.multiselect("Countries", options=countries_options, default=[])
+    countries_filter = st.multiselect(
+        "Countries", options=countries_options, default=[], key="rs_countries",
+    )
+
+    since = time_window_to_since(time_window_filter)
 
     results = filter_releases(
         all_releases,
         query=query,
         regions=scope_filter,
-        min_importance=min_imp,
+        levels=levels_filter,
         themes=themes_filter,
         countries=countries_filter,
+        release_types=rtypes_filter,
+        since=since,
     )
 
     st.divider()
     view_cols = st.columns([1, 3])
     view_mode = view_cols[0].radio(
         "View", options=["Cards", "Table"], horizontal=True, label_visibility="collapsed",
+        key="rs_view_mode",
     )
     if view_mode == "Cards":
         render_release_list(results, limit=200)
     else:
         df = releases_to_dataframe(results)
-        display_df = df[[
-            "importance", "region", "title", "date_str",
-            "countries_str", "themes_str", "source_file",
-        ]].rename(columns={
-            "importance": "Imp", "region": "Scope", "title": "Title",
-            "date_str": "Date", "countries_str": "Countries",
-            "themes_str": "Themes", "source_file": "File",
-        })
-        st.dataframe(display_df, use_container_width=True, height=480)
+        if df.empty:
+            st.info("No matching releases.")
+        else:
+            display_df = df[[
+                "importance", "region", "release_type", "title", "date_str",
+                "countries_str", "themes_str", "source_file",
+            ]].rename(columns={
+                "importance": "Imp", "region": "Scope", "release_type": "Type",
+                "title": "Title", "date_str": "Date",
+                "countries_str": "Countries", "themes_str": "Themes",
+                "source_file": "File",
+            })
+            st.dataframe(display_df, use_container_width=True, height=480)
 
 
-def tab_inflation_monitor(sidebar_state):
-    st.header("Inflation Monitor")
-    st.caption(
-        "Preset view over CPI / HICP / PPI / WPI / PCE / wages / unit labor cost / "
-        "import & export prices / inflation expectations."
-    )
+def tab_theme_monitor(sidebar_state):
+    st.header("Theme Monitor")
+    st.caption("Pick a theme (Inflation, Growth, Labor...) for a focused recap with time window + release-type filters.")
+
     all_results = _load_many(ALL_NOTE_FILES)
     render_load_status(all_results)
     all_releases = releases_from_load_results(all_results)
@@ -403,25 +444,47 @@ def tab_inflation_monitor(sidebar_state):
         st.info("No releases to filter yet.")
         return
 
-    cols = st.columns([2, 1, 1])
-    scope_filter = cols[0].multiselect(
+    cols = st.columns([2, 2, 2])
+    default_theme = (sidebar_state["themes"] or ["Inflation"])[0] if "Inflation" in ALL_THEMES else ALL_THEMES[0]
+    theme = cols[0].selectbox(
+        "Theme", options=ALL_THEMES,
+        index=ALL_THEMES.index(default_theme) if default_theme in ALL_THEMES else 0,
+        key="tm_theme",
+    )
+    time_window_filter = cols[1].selectbox(
+        "Time window", options=TIME_WINDOWS,
+        index=TIME_WINDOWS.index(sidebar_state["time_window"])
+              if sidebar_state["time_window"] in TIME_WINDOWS else 1,
+        key="tm_window",
+    )
+    levels_filter = cols[2].multiselect(
+        "Importance levels", options=IMPORTANCE_LEVELS_UI,
+        default=sidebar_state["levels"] or ["***", "****"], key="tm_levels",
+    )
+
+    cols2 = st.columns([2, 2])
+    scope_filter = cols2[0].multiselect(
         "Scopes", options=ALL_SCOPES,
         default=[sidebar_state["scope"]] if sidebar_state["scope"] else [],
-        format_func=_scope_label,
-    )
-    importance_filter = cols[1].selectbox(
-        "Min importance", options=["Any", "**", "***", "****"], index=2,
+        format_func=_scope_label, key="tm_scopes",
     )
     countries_options = sorted({
         c for s in (scope_filter or ALL_SCOPES) for c in SCOPE_COUNTRIES.get(s, [])
     })
-    countries_filter = cols[2].multiselect("Countries", options=countries_options, default=[])
-
-    base = inflation_releases(all_releases)
-    min_imp = None if importance_filter == "Any" else importance_filter
-    filtered = filter_releases(
-        base, regions=scope_filter, min_importance=min_imp, countries=countries_filter,
+    countries_filter = cols2[1].multiselect(
+        "Countries", options=countries_options, default=[], key="tm_countries",
     )
+
+    base = theme_releases(all_releases, theme)
+    since = time_window_to_since(time_window_filter)
+    filtered = filter_releases(
+        base,
+        regions=scope_filter,
+        levels=levels_filter,
+        countries=countries_filter,
+        since=since,
+    )
+    st.caption(f"Theme `{theme}`  |  window `{time_window_filter}`  |  {len(filtered)} release(s).")
     render_release_list(filtered, limit=200)
 
 
@@ -433,10 +496,10 @@ def main():
         "Sidebar scopes the view; the command bar runs QUICK-style shortcuts across all files."
     )
     command_state = command_bar()
-    render_command_results(command_state)
+    render_command_results(command_state, state)
 
     tab1, tab2, tab3, tab4 = st.tabs([
-        "Weekly Monitor", "Macro Notes", "Release Search", "Inflation Monitor",
+        "Weekly Monitor", "Macro Notes", "Release Search", "Theme Monitor",
     ])
     with tab1:
         tab_weekly_monitor(state)
@@ -445,7 +508,7 @@ def main():
     with tab3:
         tab_release_search(state, command_state)
     with tab4:
-        tab_inflation_monitor(state)
+        tab_theme_monitor(state)
 
 
 if __name__ == "__main__":
