@@ -10,6 +10,7 @@ from core.config import (
     ALL_NOTE_FILES,
     ALL_SCOPES,
     ALL_THEMES,
+    COUNTRY_SOURCE_PRIORITY,
     CURRENCY_SCOPES_DM,
     CURRENCY_SCOPES_EM,
     GITHUB_BRANCH,
@@ -20,6 +21,9 @@ from core.config import (
     SCOPE_COUNTRIES,
     SCOPE_FILES,
     SCOPE_GROUP,
+    country_source_status,
+    default_catalogue_country,
+    sources_for_country,
 )
 from core.loaders import LoadResult, load_file, load_many
 from core.normalize import dedup_releases, normalize_release_name, release_key
@@ -343,7 +347,7 @@ def tab_weekly_monitor(state):
             "Week",
             options=list(range(len(options))),
             format_func=lambda i: options[i],
-            index=1,  # default to most recent week, not "All weeks"
+            index=0,  # default = "All weeks"
             key=f"wm_week_{scope}_{view}",
         )
         if choice == 0:
@@ -399,7 +403,32 @@ def tab_weekly_monitor(state):
             render_release_card(r, default_expanded=False)
 
 
-def tab_macro_notes():
+_MACRO_NOTE_VIEWS = ["Latest note only", "Previous notes", "All notes archive"]
+
+
+def _macro_note_versions(blocks):
+    """Order parsed note blocks (already split by Data window) so the most
+    recent version is first.
+
+    Sort key: end-date desc, start-date desc, then stable order. Blocks with
+    no detectable window sink to the bottom but keep their original order.
+    """
+    annotated = []
+    for i, b in enumerate(blocks):
+        label, start, end = block_data_window(b)
+        annotated.append((b, label, start, end, i))
+    annotated.sort(
+        key=lambda x: (
+            x[3] or _dt.date.min,  # end-date desc primary
+            x[2] or _dt.date.min,  # start-date desc tiebreak
+            -x[4],                 # later original index wins ties (stable-ish)
+        ),
+        reverse=True,
+    )
+    return annotated
+
+
+def tab_macro_notes(state):
     st.header("Macro Notes")
     note_options = [
         (scope, SCOPE_FILES[scope]["macro_note"])
@@ -410,25 +439,95 @@ def tab_macro_notes():
         st.info("No macro note files configured.")
         return
 
+    # Scope-aware default: pre-select the macro note tied to the sidebar
+    # scope (e.g. sidebar=USD -> USD_MACRO_NOTE.txt).
+    sidebar_scope = (state or {}).get("scope", "")
+    default_idx = 0
+    for i, (s, _) in enumerate(note_options):
+        if s == sidebar_scope:
+            default_idx = i
+            break
+
+    cols = st.columns([3, 2])
     labels = [f"{s}  -  {fn}" for s, fn in note_options]
-    idx = st.selectbox(
-        "Select a macro note",
+    idx = cols[0].selectbox(
+        "Macro note file",
         options=list(range(len(note_options))),
+        index=default_idx,
         format_func=lambda i: labels[i],
         key="mn_select",
+        help="Default tracks the sidebar scope. Pick another to view it.",
     )
+    view_mode = cols[1].selectbox(
+        "View",
+        options=_MACRO_NOTE_VIEWS,
+        index=0,
+        key="mn_view_mode",
+        help="Latest = most recent note version only. "
+             "Previous = older versions as collapsed cards. "
+             "Archive = latest + all previous, all collapsed.",
+    )
+
     scope, filename = note_options[idx]
     result = _load_file(filename)
-    st.caption(f"Loaded `{filename}`  {source_badge(result)}")
     if result.error:
         st.warning(result.error)
     if not result.text:
         st.info(f"No content available for `{filename}`.")
         return
+
+    # extract_blocks(split_weekly=True) already splits each marker block by
+    # any embedded "Data window:" line, which is exactly the version unit
+    # we want here. Each annotated tuple is (block, label, start, end, idx).
     blocks = extract_blocks(result.text, source_file=result.filename)
-    for b in blocks:
-        st.markdown(f"**{b.stem}**  scope `{b.region or '-'}`")
-        st.code(b.raw_text, language="text", wrap_lines=True)
+    versions = _macro_note_versions(blocks)
+    if not versions:
+        st.info(f"No note versions parsed from `{filename}`.")
+        return
+
+    latest_block, latest_label, latest_start, latest_end, _ = versions[0]
+    previous = versions[1:]
+
+    # File / scope / latest window header - shown ONCE at the top, never
+    # repeated before each historical block.
+    header_bits = [f"File: `{filename}`", f"Scope: `{scope}`",
+                   source_badge(result)]
+    if latest_label:
+        header_bits.append(f"Latest data window: {latest_label}")
+    elif latest_end:
+        header_bits.append(f"Latest as-of: {latest_end.isoformat()}")
+    st.caption("  |  ".join(header_bits))
+
+    if view_mode == "Latest note only":
+        st.markdown(f"### {scope} - Macro Note")
+        if latest_label:
+            st.caption(f"Data window: {latest_label}")
+        st.code(latest_block.raw_text, language="text", wrap_lines=True)
+        if previous:
+            st.caption(
+                f"{len(previous)} earlier version(s) hidden. "
+                "Switch View to 'Previous notes' or 'All notes archive' to see them."
+            )
+        return
+
+    if view_mode == "Previous notes":
+        if not previous:
+            st.info("No previous note versions in this file.")
+            return
+        st.caption(f"{len(previous)} previous version(s).")
+        for blk, lbl, s, e, _ in previous:
+            label = lbl or (e.isoformat() if e else f"{blk.stem} (no window)")
+            with st.expander(f"Data window: {label}", expanded=False):
+                st.code(blk.raw_text, language="text", wrap_lines=True)
+        return
+
+    # Archive mode: latest + all previous, all collapsed in one timeline.
+    st.caption(f"{len(versions)} note version(s) in archive.")
+    for j, (blk, lbl, s, e, _) in enumerate(versions):
+        label = lbl or (e.isoformat() if e else f"{blk.stem} (no window)")
+        prefix = "Latest" if j == 0 else "Previous"
+        with st.expander(f"{prefix}  -  Data window: {label}", expanded=False):
+            st.code(blk.raw_text, language="text", wrap_lines=True)
 
 
 def tab_release_search(sidebar_state, command_state):
@@ -612,20 +711,22 @@ def tab_country_release_catalogue():
         "Click a row to open the latest occurrence and compare with previous prints."
     )
 
-    all_results = _load_many(ALL_NOTE_FILES)
-    render_load_status(all_results)
-    all_releases = releases_from_load_results(all_results)
-    if not all_releases:
-        st.info("No releases parsed yet.")
-        return
-
-    countries = sorted({c for r in all_releases for c in (r.countries or [])})
-    if not countries:
-        st.info("No country-tagged releases found in the archive.")
+    # Load only the country-priority files later, but we still need an
+    # initial pass to know which countries appear in the archive at all.
+    # We use the union of every country's frozen+live source set so the
+    # selectbox lists exactly the countries we have data for.
+    catalogue_countries = list(COUNTRY_SOURCE_PRIORITY.keys())
+    if not catalogue_countries:
+        st.info("No countries are mapped to source files. See COUNTRY_SOURCE_PRIORITY.")
         return
 
     cols = st.columns([2, 2, 3])
-    country = cols[0].selectbox("Country", options=countries, key="cc_country")
+    country = cols[0].selectbox(
+        "Country",
+        options=sorted(catalogue_countries),
+        key="cc_country",
+        help="Catalogue is built only from this country's dedicated source files.",
+    )
     theme_filter = cols[1].multiselect(
         "Theme", options=_CATALOGUE_THEMES, default=[], key="cc_themes",
         help="Filter the catalogue to one or more themes.",
@@ -636,16 +737,59 @@ def tab_country_release_catalogue():
         key="cc_search",
     )
 
-    country_releases = [r for r in all_releases if country in (r.countries or [])]
-    if not country_releases:
-        st.info(f"No releases tagged with {country}.")
+    cols_opts = st.columns([2, 2, 2])
+    include_live = cols_opts[0].checkbox(
+        "Include current live week",
+        value=False,
+        key="cc_include_live",
+        help="Default = frozen archive only. Toggle to add *_WEEK_LIVE_MACRO.txt "
+             "(provisional, current week). Frozen takes precedence on duplicates.",
+    )
+    only_known = cols_opts[1].checkbox(
+        "Hide unknown / low-confidence rows",
+        value=True,
+        key="cc_only_known",
+        help="On (default): only show releases that map to a known recurring "
+             "indicator. Off: also show low-confidence titles.",
+    )
+
+    # Resolve the country -> file allow-list for this view.
+    allowed_files = sources_for_country(country, include_live=include_live)
+    if not allowed_files:
+        st.info(f"No source files mapped for `{country}`. Add an entry to COUNTRY_SOURCE_PRIORITY.")
         return
 
-    # Dedup by stable key BEFORE grouping. Two parses of the same Reuters
-    # event (e.g. one in USD_WEEK.txt and one in WEEKPM.txt, or two weekly
-    # blocks of the same archive describing the same release) collapse into
-    # a single occurrence. This guarantees "latest" never appears again in
-    # "previous occurrences".
+    # Sources used label: split frozen vs live for visual clarity.
+    frozen_used = [f for f in allowed_files if country_source_status(f) == "frozen"]
+    live_used   = [f for f in allowed_files if country_source_status(f) == "live"]
+    src_caption_bits = []
+    if frozen_used:
+        src_caption_bits.append("Frozen: " + ", ".join(f"`{f}`" for f in frozen_used))
+    if live_used:
+        src_caption_bits.append("Live: " + ", ".join(f"`{f}`" for f in live_used))
+    st.caption("Sources used  |  " + "  |  ".join(src_caption_bits))
+
+    # Load only the files in the allow-list. Restrict releases to (a) the
+    # selected country AND (b) source_file in the allow-list.
+    all_results = _load_many(allowed_files)
+    render_load_status(all_results)
+    all_releases = releases_from_load_results(all_results)
+    if not all_releases:
+        st.info(f"No releases parsed from {', '.join(allowed_files)}.")
+        return
+
+    country_releases = [
+        r for r in all_releases
+        if country in (r.countries or []) and r.source_file in allowed_files
+    ]
+    if not country_releases:
+        st.info(f"No releases tagged with {country} in the allowed source files.")
+        return
+
+    # Dedup by stable key. When the same release appears in both frozen and
+    # live files for the same date/importance, frozen wins because frozen
+    # files come first in `allowed_files` and dedup_releases keeps the FIRST
+    # occurrence.
     country_releases = dedup_releases(country_releases)
 
     groups = {}
@@ -654,9 +798,10 @@ def tab_country_release_catalogue():
         name, theme, conf = normalize_release_name(r.title)
         if not name:
             continue
+        if only_known and conf == "Low":
+            continue
         if theme_filter and theme not in theme_filter:
             continue
-        if name_query and name_query.strip().lower() not in name.lower():
             continue
         groups.setdefault(name, []).append(r)
         if name not in meta:
@@ -777,13 +922,86 @@ def tab_country_release_catalogue():
         st.caption("No previous occurrences in archive.")
 
 
+# ---------------------------------------------------------------------------
+# Scope as a global state driver
+# ---------------------------------------------------------------------------
+# Sidebar scope (sb_scope) is the source of truth. Every tab keeps its own
+# widget state (file selection, country selection, search, levels, themes,
+# weeks). When scope changes, those persisted selections must be cleared so
+# each tab re-derives its defaults from the new scope.
+
+# Tab-local widget keys to drop on scope change. The sidebar keys
+# (sb_group, sb_scope, sb_view, sb_levels, sb_themes, sb_time_window) and
+# the refresh token are deliberately NOT listed here.
+_SCOPE_RESET_KEYS = (
+    # Macro Notes
+    "mn_select", "mn_view_mode",
+    # Release Search
+    "rs_query", "rs_scopes", "rs_themes", "rs_levels", "rs_window",
+    "rs_rtypes", "rs_countries", "rs_deep_search", "rs_view_mode",
+    # Theme Monitor
+    "tm_theme", "tm_window", "tm_levels", "tm_scopes", "tm_countries",
+    # Country Release Catalogue
+    "cc_country", "cc_themes", "cc_search", "cc_include_live",
+    "cc_only_known", "cc_table", "cc_compare",
+)
+
+
+def _reset_state_for_scope(new_scope, session=None):
+    """Pop tab-local widget keys and seed scope-driven defaults.
+
+    Pulled out as a pure function (with `session` injectable) so it is
+    unit-testable without spinning up Streamlit. Returns the same session
+    dict for chaining.
+    """
+    if session is None:
+        session = st.session_state
+    for key in _SCOPE_RESET_KEYS:
+        try:
+            del session[key]
+        except KeyError:
+            pass
+    # Active command state may carry stale region filters from a prior scope.
+    session["active_command"] = {}
+    # Pre-seed the catalogue country so the new tab default reflects scope.
+    new_country = default_catalogue_country(new_scope)
+    if new_country:
+        session["cc_country"] = new_country
+    session["_prev_scope"] = new_scope
+    return session
+
+
+def _handle_scope_change(scope):
+    """If sidebar scope changed since the last render, reset tab state and rerun.
+
+    First render: just records the scope, no reset (so users keep any
+    selections they made before the very first widget refresh). Subsequent
+    renders: on real change, reset and rerun so widgets pick up new defaults.
+    Returns True when a reset happened.
+    """
+    prev = st.session_state.get("_prev_scope")
+    if prev is None:
+        st.session_state["_prev_scope"] = scope
+        return False
+    if prev == scope:
+        return False
+    _reset_state_for_scope(scope)
+    st.rerun()
+    return True
+
+
 def main():
     state = sidebar()
+    # Scope is global. The moment it changes, every tab forgets its prior
+    # widget state and re-derives defaults from the new scope.
+    _handle_scope_change(state["scope"])
+
     st.title("Macro FX Feed Dashboard")
     st.caption(
         "Structured macro terminal over the GitHub-hosted archive. "
         "Sidebar scopes the view; the command bar runs QUICK-style shortcuts across all files."
     )
+    st.caption(f"Current scope: `{state['scope']}`")
     command_state = command_bar()
     render_command_results(command_state, state)
 
@@ -794,7 +1012,7 @@ def main():
     with tab1:
         tab_weekly_monitor(state)
     with tab2:
-        tab_macro_notes()
+        tab_macro_notes(state)
     with tab3:
         tab_release_search(state, command_state)
     with tab4:
