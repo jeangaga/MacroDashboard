@@ -22,12 +22,18 @@ from core.config import (
     SCOPE_GROUP,
 )
 from core.loaders import LoadResult, load_file, load_many
-from core.normalize import normalize_release_name
-from core.parsers import extract_blocks, releases_from_load_results
+from core.normalize import dedup_releases, normalize_release_name, release_key
+from core.parsers import (
+    block_data_window,
+    extract_blocks,
+    extract_releases,
+    releases_from_load_results,
+)
 from core.render import (
     importance_chip,
     render_block,
     render_load_status,
+    render_release_card,
     render_release_list,
     source_badge,
 )
@@ -296,7 +302,6 @@ def tab_weekly_monitor(state):
         return
 
     result = _load_file(scope_file)
-    st.caption(f"Loaded `{scope_file}`  {source_badge(result)}")
     if result.error:
         st.warning(result.error)
     if not result.text:
@@ -305,11 +310,93 @@ def tab_weekly_monitor(state):
 
     blocks = extract_blocks(result.text, source_file=result.filename)
     scope_blocks = [b for b in blocks if b.region == scope] or blocks
-    min_importance = None
-    if levels:
-        min_importance = min(levels, key=len)
+    if not scope_blocks:
+        st.info(f"No `{scope}` blocks parsed from `{scope_file}`.")
+        return
+
+    # File / region heading once, with source + timestamp.
+    st.caption(
+        f"File: `{scope_file}`  |  Region: `{scope}`  |  {source_badge(result)}"
+    )
+
+    # Build (label, block, start, end) entries so the Week selector can rank
+    # by date even when only an inferred range is available.
+    entries = []
     for b in scope_blocks:
-        render_block(b, min_importance=min_importance)
+        label, start, end = block_data_window(b)
+        entries.append({"label": label, "block": b, "start": start, "end": end})
+
+    # Sort weekly entries with most recent first. Blocks without any date
+    # information sink to the bottom in stable order.
+    entries.sort(
+        key=lambda e: (e["start"] or _dt.date.min),
+        reverse=True,
+    )
+
+    # Week selector if there is more than one weekly entry.
+    if len(entries) > 1:
+        options = ["All weeks"] + [
+            (e["label"] or f"{e['block'].stem} (no window)")
+            for e in entries
+        ]
+        choice = st.selectbox(
+            "Week",
+            options=list(range(len(options))),
+            format_func=lambda i: options[i],
+            index=1,  # default to most recent week, not "All weeks"
+            key=f"wm_week_{scope}_{view}",
+        )
+        if choice == 0:
+            selected_entries = entries
+        else:
+            selected_entries = [entries[choice - 1]]
+    else:
+        selected_entries = entries
+
+    sort_desc = st.checkbox(
+        "Sort releases newest-first",
+        value=False,
+        key=f"wm_sort_{scope}_{view}",
+        help="Off = chronological order (Mon to Fri). On = newest first.",
+    )
+
+    min_importance = min(levels, key=len) if levels else None
+
+    for entry in selected_entries:
+        b = entry["block"]
+        label = entry["label"]
+        if label:
+            st.markdown(f"### Data window: {label}")
+        else:
+            st.markdown(f"### {b.stem} (no data window declared)")
+
+        releases = extract_releases(b)
+        # Dedup by stable key (country|normalized|date|importance) so the
+        # same Reuters event parsed twice in the same archive doesn't
+        # surface twice.
+        releases = dedup_releases(releases)
+        if min_importance:
+            from core.search import filter_releases
+            releases = filter_releases(releases, min_importance=min_importance)
+
+        if not releases:
+            st.info("No releases at the selected importance in this week.")
+            continue
+
+        # Stable sort: by parsed date (asc by default), preserving original
+        # order on ties (which mirrors how the source file is laid out).
+        def _sort_key(idx_r):
+            idx, r = idx_r
+            d = parse_release_date(r.date_str) or _dt.date.min
+            return (d, idx)
+
+        indexed = list(enumerate(releases))
+        indexed.sort(key=_sort_key, reverse=sort_desc)
+        sorted_releases = [r for _, r in indexed]
+
+        st.caption(f"{len(sorted_releases)} release(s) in this window")
+        for r in sorted_releases:
+            render_release_card(r, default_expanded=False)
 
 
 def tab_macro_notes():
@@ -553,6 +640,13 @@ def tab_country_release_catalogue():
     if not country_releases:
         st.info(f"No releases tagged with {country}.")
         return
+
+    # Dedup by stable key BEFORE grouping. Two parses of the same Reuters
+    # event (e.g. one in USD_WEEK.txt and one in WEEKPM.txt, or two weekly
+    # blocks of the same archive describing the same release) collapse into
+    # a single occurrence. This guarantees "latest" never appears again in
+    # "previous occurrences".
+    country_releases = dedup_releases(country_releases)
 
     groups = {}
     meta = {}
