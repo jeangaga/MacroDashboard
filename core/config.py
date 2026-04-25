@@ -219,3 +219,150 @@ SCOPE_COUNTRIES = {
 }
 
 REGION_COUNTRIES = SCOPE_COUNTRIES
+
+# ---------------------------------------------------------------------------
+# Country -> source priority
+# ---------------------------------------------------------------------------
+# Frozen archive: validated, historical source of truth.
+# Live archive:   *_WEEK_LIVE_MACRO.txt files - current week / provisional only.
+#
+# Country catalogue rule:
+#   - default (frozen only) uses the country's frozen file list, with the
+#     country-specific currency file taking priority over the regional
+#     bucket file.
+#   - "Include current live week" toggle adds the regional live file.
+#   - rows from unrelated regional files (e.g. EUR_WEEK.txt for a US query)
+#     never appear.
+
+COUNTRY_SOURCE_PRIORITY = {
+    # Currency block (frozen single file, live in same block)
+    "US":          {"frozen": ["USD_WEEK.txt"],               "live": ["USD_WEEK_LIVE_MACRO.txt"]},
+
+    # Euro area - all member countries pull from EUR file (no per-country file exists)
+    "Eurozone":    {"frozen": ["EUR_WEEK.txt"],               "live": ["EUR_WEEK_LIVE_MACRO.txt"]},
+    "Germany":     {"frozen": ["EUR_WEEK.txt"],               "live": ["EUR_WEEK_LIVE_MACRO.txt"]},
+    "France":      {"frozen": ["EUR_WEEK.txt"],               "live": ["EUR_WEEK_LIVE_MACRO.txt"]},
+    "Italy":       {"frozen": ["EUR_WEEK.txt"],               "live": ["EUR_WEEK_LIVE_MACRO.txt"]},
+    "Spain":       {"frozen": ["EUR_WEEK.txt"],               "live": ["EUR_WEEK_LIVE_MACRO.txt"]},
+
+    # DM - country file first, DM bucket as fallback, DM live for current week
+    "UK":          {"frozen": ["GBP_WEEK.txt", "DM_WEEK.txt"], "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+    "Japan":       {"frozen": ["JPY_WEEK.txt", "DM_WEEK.txt"], "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+    "Canada":      {"frozen": ["CAD_WEEK.txt", "DM_WEEK.txt"], "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+    "Australia":   {"frozen": ["AUD_WEEK.txt", "DM_WEEK.txt"], "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+    "Switzerland": {"frozen": ["CHF_WEEK.txt", "DM_WEEK.txt"], "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+    "Norway":      {"frozen": ["NOK_WEEK.txt", "DM_WEEK.txt"], "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+    "Sweden":      {"frozen": ["SEK_WEEK.txt", "DM_WEEK.txt"], "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+    "New Zealand": {"frozen": ["DM_WEEK.txt"],                 "live": ["DM_WEEK_LIVE_MACRO.txt"]},
+
+    # EM - country file first, EM bucket as fallback, EM live for current week
+    "China":       {"frozen": ["CNH_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "Korea":       {"frozen": ["KRW_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "India":       {"frozen": ["INR_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "Brazil":      {"frozen": ["BRL_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "Mexico":      {"frozen": ["MXN_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "Turkey":      {"frozen": ["TRY_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "Poland":      {"frozen": ["PLN_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "Taiwan":      {"frozen": ["TWD_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+    "South Africa":{"frozen": ["ZAR_WEEK.txt", "EM_WEEK.txt"], "live": ["EM_WEEK_LIVE_MACRO.txt"]},
+}
+
+
+def sources_for_country(country, *, include_live=False):
+    """Return the ordered list of source files for the given country.
+
+    Frozen files always come first (country-specific then regional fallback).
+    Live files are appended only when include_live=True. Duplicates are
+    preserved in priority order.
+    """
+    spec = COUNTRY_SOURCE_PRIORITY.get(country)
+    if not spec:
+        return []
+    out = []
+    for f in spec.get("frozen") or []:
+        if f and f not in out:
+            out.append(f)
+    if include_live:
+        for f in spec.get("live") or []:
+            if f and f not in out:
+                out.append(f)
+    return out
+
+
+def country_source_status(filename):
+    """Classify a source filename as 'frozen', 'live', or 'other' for UI labels."""
+    if not filename:
+        return "other"
+    if filename.endswith("_WEEK_LIVE_MACRO.txt"):
+        return "live"
+    if filename.endswith("_WEEK.txt"):
+        return "frozen"
+    return "other"
+
+
+# ---------------------------------------------------------------------------
+# Scope -> default catalogue country
+# ---------------------------------------------------------------------------
+# When the sidebar scope changes, the Catalogue tab's country selector must
+# reset to a representative country for the new scope. Region scopes pick a
+# regional default; currency scopes fall back to their single country.
+
+_SCOPE_DEFAULT_COUNTRY_OVERRIDES = {
+    # Regional shortcut: the "Eurozone" pseudo-country pulls EUR_WEEK.txt
+    # without committing to any one euro member.
+    "EUR": "Eurozone",
+    "DM":  "UK",
+    "EM":  "China",
+}
+
+
+def default_catalogue_country(scope):
+    """Pick a representative catalogue country for the given sidebar scope.
+
+    Returns None when the scope has no countries (e.g. PM/shared scopes), so
+    callers can leave the catalogue selection alone in that case.
+    """
+    if not scope:
+        return None
+    if scope in _SCOPE_DEFAULT_COUNTRY_OVERRIDES:
+        c = _SCOPE_DEFAULT_COUNTRY_OVERRIDES[scope]
+        if c in COUNTRY_SOURCE_PRIORITY:
+            return c
+    for c in SCOPE_COUNTRIES.get(scope, []):
+        if c in COUNTRY_SOURCE_PRIORITY:
+            return c
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Scope -> default catalogue country
+# ---------------------------------------------------------------------------
+# When the sidebar scope changes, the Catalogue tab's country selector must
+# reset to a representative country for the new scope. Region scopes pick a
+# regional default; currency scopes fall back to their single country.
+
+_SCOPE_DEFAULT_COUNTRY_OVERRIDES = {
+    # Regional shortcut: the "Eurozone" pseudo-country pulls EUR_WEEK.txt
+    # without committing to any one euro member.
+    "EUR": "Eurozone",
+    "DM":  "UK",
+    "EM":  "China",
+}
+
+
+def default_catalogue_country(scope):
+    """Pick a representative catalogue country for the given sidebar scope.
+
+    Returns None when the scope has no countries (e.g. PM/shared scopes), so
+    callers can leave the catalogue selection alone in that case.
+    """
+    if not scope:
+        return None
+    if scope in _SCOPE_DEFAULT_COUNTRY_OVERRIDES:
+        c = _SCOPE_DEFAULT_COUNTRY_OVERRIDES[scope]
+        if c in COUNTRY_SOURCE_PRIORITY:
+            return c
+    for c in SCOPE_COUNTRIES.get(scope, []):
+        if c in COUNTRY_SOURCE_PRIORITY:
+            return c
+    return None

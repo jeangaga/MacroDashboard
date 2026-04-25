@@ -275,6 +275,77 @@ _TITLE_SKIP_PREFIXES = (
     "data window",
 )
 
+# Commentary-fragment markers: when a candidate title starts with one of these
+# phrases it's narrative text from an Economist Layer / HF Take block, not a
+# real release header. Lower-cased prefix match.
+_COMMENTARY_PREFIXES = (
+    "for the regional story",
+    "for the bigger picture",
+    "for the headline story",
+    "this matters because",
+    "this is why",
+    "the regional story",
+    "the bigger picture",
+    "the headline story",
+    "the read-through",
+    "the read through",
+    "the takeaway",
+    "the take-away",
+    "what this means",
+    "what to watch",
+    "key takeaways",
+    "in summary",
+    "bottom line",
+    "false dawn",
+    "rebound from collapse",
+    "miss vs consensus",
+    "beat vs consensus",
+    "domestic weakness",
+    "foreign-led only",
+    "the question is",
+    "looking ahead",
+)
+
+# Narrative phrases that strongly suggest a sentence is prose commentary,
+# not a release header.
+_NARRATIVE_PHRASES = (
+    " matters because ",
+    " is too large to absorb ",
+    " driven by ",
+    " offset by ",
+    " owing to ",
+    " on the back of ",
+    " in line with ",
+    " consistent with ",
+    " suggests that ",
+    " implies that ",
+)
+
+
+def _looks_like_commentary_fragment(line):
+    """True when the line looks like prose / commentary, not a release title."""
+    s = (line or "").strip()
+    if not s:
+        return False
+    low = s.lower()
+    for p in _COMMENTARY_PREFIXES:
+        if low.startswith(p):
+            return True
+    # Long narrative sentence without the country -- indicator structure of a
+    # release title.
+    has_dash_structure = _TITLE_DASH_RE.search(s) is not None
+    has_country = bool(country_from_title(s))
+    if not has_dash_structure and not has_country:
+        for ph in _NARRATIVE_PHRASES:
+            if ph in low:
+                return True
+        # Heavily prose-like lines (long, many words, no slash list, no
+        # country, no dash separator) are commentary.
+        word_count = len(s.split())
+        if len(s) > 110 and word_count > 16 and "/" not in s:
+            return True
+    return False
+
 
 def _looks_like_title_line(line):
     s = (line or "").strip()
@@ -287,6 +358,8 @@ def _looks_like_title_line(line):
         if low.startswith(p):
             return False
     if len(s) > 220:
+        return False
+    if _looks_like_commentary_fragment(s):
         return False
     return True
 

@@ -55,7 +55,10 @@ _RULES = [
     # ============================================================
     # Labour
     # ============================================================
-    (re.compile(r"\b(?:non[\s-]?farm\s+payroll|nfp|payrolls?)\b", re.I),
+    # NFP only - generic "payrolls?" was catching unrelated UK labour-market
+    # headers like "HMRC Payrolls Change". The release must explicitly say
+    # "non-farm payrolls" or "NFP" to qualify.
+    (re.compile(r"\b(?:non[\s-]?farm\s+payrolls?|nfp)\b", re.I),
                                                                     "Non-Farm Payrolls", "Labor", "High"),
     (re.compile(r"\b(?:labou?r\s+force|employment\s+change|unemployment\s+rate|jobs?\s+report)\b", re.I),
                                                                     "Labour Force", "Labor", "High"),
