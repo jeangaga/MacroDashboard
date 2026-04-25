@@ -1,6 +1,8 @@
 """Text helpers: importance-flag detection, country/theme tagging, date detection."""
 from __future__ import annotations
 
+import calendar
+import datetime as _dt
 import re
 from typing import Iterable, Optional
 
@@ -75,6 +77,82 @@ def first_date_string(text):
         if m:
             return m.group(0)
     return None
+
+
+_MONTH_ABBR = {m.lower(): i for i, m in enumerate(calendar.month_abbr) if m}
+
+
+def parse_release_date(text):
+    """Best-effort parse of the first date in `text` to datetime.date, or None."""
+    if not text:
+        return None
+    s = first_date_string(text)
+    if not s:
+        return None
+    s = s.strip()
+    m = re.match(r"^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$", s)
+    if m:
+        day, mon, year = m.groups()
+        mi = _MONTH_ABBR.get(mon[:3].lower())
+        if mi:
+            try:
+                return _dt.date(int(year), mi, int(day))
+            except ValueError:
+                pass
+    m = re.match(r"^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$", s)
+    if m:
+        mon, day, year = m.groups()
+        mi = _MONTH_ABBR.get(mon[:3].lower())
+        if mi:
+            try:
+                return _dt.date(int(year), mi, int(day))
+            except ValueError:
+                pass
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    if m:
+        try:
+            return _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+    if m:
+        a = int(m.group(1)); b = int(m.group(2)); c = int(m.group(3))
+        try:
+            if a > 12:
+                return _dt.date(c, b, a)
+            return _dt.date(c, a, b)
+        except ValueError:
+            return None
+    return None
+
+
+_PERIOD_PARENS = re.compile(r"\s*\([^)]*\)\s*$")
+_TRAILING_DATE = re.compile(
+    r"\s*[-\u2013\u2014]\s*"
+    r"(?:\d{1,2}\s+[A-Za-z]+\s+\d{4}"
+    r"|[A-Za-z]+\s+\d{1,2},?\s+\d{4}"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|\d{1,2}/\d{1,2}/\d{4})"
+    r"\s*$"
+)
+_SEPARATORS = (" \u2014 ", " \u2013 ", " - ", " -- ")
+
+
+def release_type(title):
+    """Strip country prefix / period / trailing date so that
+    'United States - PPI Final Demand (Mar)' -> 'PPI Final Demand'.
+    """
+    if not title:
+        return ""
+    t = title.strip()
+    t = _TRAILING_DATE.sub("", t)
+    t = _PERIOD_PARENS.sub("", t).strip()
+    for sep in _SEPARATORS:
+        if sep in t:
+            t = t.split(sep, 1)[1].strip()
+            break
+    t = _PERIOD_PARENS.sub("", t).strip()
+    return t
 
 
 def collapse_blank_lines(text):
