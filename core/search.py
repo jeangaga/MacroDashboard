@@ -39,6 +39,19 @@ def releases_to_dataframe(releases):
     ).reset_index(drop=True)
 
 
+def _haystack_metadata(r):
+    """The default haystack: title, countries, themes, region, release_type.
+    NO raw_block - that is opt-in via deep_search.
+    """
+    return "\n".join([
+        r.title or "",
+        ", ".join(r.countries or []),
+        ", ".join(r.themes or []),
+        r.region or "",
+        release_type(r.title),
+    ]).lower()
+
+
 def filter_releases(
     releases,
     *,
@@ -53,6 +66,7 @@ def filter_releases(
     release_types=None,
     since=None,
     until=None,
+    deep_search=False,
 ):
     """Filter a list of Release objects.
 
@@ -60,6 +74,10 @@ def filter_releases(
     release_types: iterable of canonical release names (output of release_type()).
     since/until: datetime.date inclusive bounds; releases without a parseable date
                  are dropped when either bound is set.
+    deep_search: when True, search the full raw_block in addition to metadata.
+                 Default False - we only search title / country / theme / scope /
+                 release_type, which avoids false positives from passing mentions
+                 inside commentary paragraphs.
     """
     out = []
     q = (query or "").strip().lower()
@@ -75,8 +93,12 @@ def filter_releases(
     use_dates = since is not None or until is not None
 
     for r in releases:
-        if q and q not in (r.title + "\n" + r.raw_block).lower():
-            continue
+        if q:
+            haystack = _haystack_metadata(r)
+            if deep_search:
+                haystack = haystack + "\n" + (r.raw_block or "").lower()
+            if q not in haystack:
+                continue
         if regions_set and r.region not in regions_set:
             continue
         if levels_set:
@@ -154,7 +176,6 @@ def time_window_to_since(label, today=None):
     if label == "Last 4 weeks":
         return today - _dt.timedelta(weeks=4)
     if label == "Last 3 months":
-        # ~90 days; calendar-month math is overkill here
         return today - _dt.timedelta(days=92)
     if label == "Last 6 months":
         return today - _dt.timedelta(days=183)

@@ -31,13 +31,17 @@ def importance_chip(flag):
     return f"{flag} ({label})"
 
 
-def render_block(block, *, min_importance=None):
+def render_block(block, *, min_importance=None, levels=None):
+    """Render a parsed block. If `levels` (list of '*'..'****') or `min_importance`
+    is provided, filter the contained releases. Always renders compact cards
+    that are collapsed by default.
+    """
     header = f"**{block.stem}**  {block.source_file}"
     if block.region:
         header += f"  region: `{block.region}`"
     st.markdown(header)
 
-    if not min_importance:
+    if not levels and not min_importance:
         st.code(collapse_blank_lines(block.raw_text), language="text", wrap_lines=True)
         return
 
@@ -45,31 +49,37 @@ def render_block(block, *, min_importance=None):
     from core.search import filter_releases
 
     releases = extract_releases(block)
-    releases = filter_releases(releases, min_importance=min_importance)
+    releases = filter_releases(releases, levels=levels, min_importance=min_importance)
     if not releases:
-        st.info(f"No releases at importance >= {min_importance} in this block.")
+        label = "/".join(levels) if levels else f">= {min_importance}"
+        st.info(f"No releases at importance {label} in this block.")
         return
-    st.caption(f"{len(releases)} release(s) at importance >= {min_importance}")
+    label = "/".join(levels) if levels else f">= {min_importance}"
+    st.caption(f"{len(releases)} release(s) at importance {label}")
     for r in releases:
-        render_release_card(r, default_expanded=(importance_rank(r.importance) >= 4))
+        render_release_card(r)
 
 
 def render_release_card(release, *, default_expanded=False):
+    """Compact, collapsed-by-default release card.
+
+    Header: title  ·  ****  ·  date  ·  country (if any)
+    Body (when expanded): scope/file/themes meta + the full raw block.
+    """
     title_bits = [release.title or "(untitled release)"]
     if release.importance:
         title_bits.append(release.importance)
     if release.date_str:
         title_bits.append(release.date_str)
-    label = "   ".join(title_bits)
+    if release.countries:
+        title_bits.append(", ".join(release.countries))
+    label = "   |   ".join(title_bits)
 
     with st.expander(label, expanded=default_expanded):
-        meta_cols = st.columns(4)
+        meta_cols = st.columns(3)
         meta_cols[0].caption(f"Scope: `{release.region or '-'}`")
         meta_cols[1].caption(f"File: `{release.source_file}`")
         meta_cols[2].caption(
-            "Country: " + (", ".join(release.countries) if release.countries else "-")
-        )
-        meta_cols[3].caption(
             "Themes: " + (", ".join(release.themes) if release.themes else "-")
         )
         st.code(release.raw_block, language="text", wrap_lines=True)
@@ -87,7 +97,7 @@ def render_release_list(releases, *, empty_message="No matching releases.", limi
     else:
         st.caption(f"{total} result(s).")
     for r in releases:
-        render_release_card(r, default_expanded=(importance_rank(r.importance) >= 4))
+        render_release_card(r, default_expanded=False)
 
 
 def render_load_status(results):

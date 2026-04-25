@@ -16,7 +16,7 @@ from typing import Iterable, Optional
 from core.config import BLOCK_STEMS, MARKER_PREFIX, MARKER_SUFFIX
 from utils.text import (
     collapse_blank_lines,
-    detect_countries,
+    country_from_title,
     detect_themes,
     first_date_string,
     max_importance,
@@ -139,15 +139,64 @@ class Release:
 
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n+")
 
+# Lines we never want to use as a release title.
+_TITLE_SKIP_PREFIXES = (
+    "release date",
+    "local time",
+    "importance",
+    "reuters data",
+    "economist layer",
+    "hf take",
+    "signal tension",
+    "consensus",
+    "previous",
+    "actual",
+)
+
+
+def _looks_like_title_line(line):
+    """Heuristic: is this an actual heading rather than a metadata key?"""
+    s = (line or "").strip()
+    if not s:
+        return False
+    low = s.lower()
+    for p in _TITLE_SKIP_PREFIXES:
+        if low.startswith(p):
+            return False
+    if len(s) > 220:
+        return False
+    return True
+
+
+def _looks_like_preamble(paragraph):
+    """A short un-flagged paragraph that should be promoted to title for the
+    next group."""
+    if not paragraph:
+        return False
+    line = ""
+    for raw in paragraph.splitlines():
+        if raw.strip():
+            line = raw.strip()
+            break
+    if not _looks_like_title_line(line):
+        return False
+    if any(sep in line for sep in (" \u2014 ", " \u2013 ", " - ", " -- ")):
+        return True
+    if country_from_title(line):
+        return True
+    return len(line) <= 120
+
 
 def extract_releases(block):
     """Split a block into releases.
 
-    A release starts at a paragraph containing an importance flag (* .. ****).
-    All subsequent paragraphs that do NOT themselves carry an importance flag are
-    attached to that release as commentary (Reuters Data, Economist Layer,
-    HF Take, Signal Tension Check, etc). The raw_block therefore preserves the
-    full content of the release, not just the header paragraph.
+    A release starts at a paragraph containing an importance flag.
+    All subsequent un-flagged paragraphs are commentary.
+
+    Special case: a short un-flagged paragraph that immediately PRECEDES a
+    flagged paragraph is treated as the actual release TITLE (e.g. PM-style
+    layout where the title sits one paragraph above the 'Release Date: ...'
+    metadata block).
     """
     if not block.raw_text:
         return []
@@ -155,18 +204,41 @@ def extract_releases(block):
 
     groups = []
     current = None
+    pending_preamble = None
+
     for para in paragraphs:
         para = para.strip("\n")
         if not para.strip():
             continue
         flag = max_importance(para)
         if flag is not None:
+            # If the last paragraph appended to `current` is a preamble for
+            # THIS new release, peel it off the prior group.
+            promoted = None
+            if (
+                current is not None
+                and len(current) >= 2
+                and max_importance(current[-1]) is None
+                and _looks_like_preamble(current[-1])
+            ):
+                promoted = current.pop()
             if current is not None:
                 groups.append(current)
-            current = [para]
+            if promoted is not None:
+                current = [promoted, para]
+            elif pending_preamble is not None:
+                current = [pending_preamble, para]
+            else:
+                current = [para]
+            pending_preamble = None
         else:
-            if current is not None:
-                current.append(para)
+            if current is None:
+                if _looks_like_preamble(para):
+                    pending_preamble = para
+                else:
+                    pending_preamble = None
+                continue
+            current.append(para)
 
     if current is not None:
         groups.append(current)
@@ -175,12 +247,28 @@ def extract_releases(block):
     region = block.region
     kind = block.kind
     for group in groups:
-        header = group[0]
+        first = group[0]
+        first_flag = max_importance(first)
+        if first_flag is None:
+            title_source = first
+            header_for_flag = group[1] if len(group) > 1 else first
+        else:
+            title_source = first
+            header_for_flag = first
+
+        flag = max_importance(header_for_flag)
         full_text = "\n\n".join(group)
-        flag = max_importance(header)
-        title = _first_meaningful_line(header)
+
+        title = _best_title_line(title_source)
+        if not title:
+            for para in group:
+                cand = _best_title_line(para)
+                if cand:
+                    title = cand
+                    break
+
         date_str = first_date_string(full_text)
-        countries = detect_countries(full_text)
+        countries = country_from_title(title)
         themes = detect_themes(full_text)
         releases.append(Release(
             source_file=block.source_file,
@@ -197,7 +285,20 @@ def extract_releases(block):
     return releases
 
 
-def _first_meaningful_line(text: str) -> str:
+def _best_title_line(paragraph):
+    """First line of `paragraph` that doesn't look like metadata."""
+    if not paragraph:
+        return ""
+    for raw in paragraph.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _looks_like_title_line(line):
+            return line
+    return ""
+
+
+def _first_meaningful_line(text):
     for line in text.splitlines():
         line = line.strip()
         if line:
@@ -205,8 +306,8 @@ def _first_meaningful_line(text: str) -> str:
     return ""
 
 
-def _clean_title(title: str) -> str:
-    t = re.sub(r"\s*\|\s*\*{1,4}\s*$", "", title).strip()
+def _clean_title(title):
+    t = re.sub(r"\s*\|\s*\*{1,4}\s*$", "", title or "").strip()
     t = re.sub(r"\s*\*{1,4}\s*$", "", t).strip()
     return t[:180]
 
