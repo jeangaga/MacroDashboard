@@ -537,6 +537,61 @@ def _catalogue_sort_key(r):
     return (period, pub)
 
 
+_EXPORT_SEPARATOR = "-" * 50
+
+
+def format_release_export(country, release_name, releases, *, limit=None):
+    """Build a plain-text export of `releases` for the given catalogue row.
+
+    Designed for paste into an LLM:
+      - no markdown / no formatting
+      - one block per occurrence with `date | importance` + title + full
+        raw_block, separated by a 50-dash divider
+      - caller is responsible for sorting (latest reference period first)
+
+    `limit` truncates to the first N occurrences. None = all.
+    """
+    rels_all = list(releases or [])
+    rels = rels_all[:limit] if (limit and limit < len(rels_all)) else rels_all
+
+    header = f"{country} - {release_name}"
+    parts = [header, ""]
+    if not rels:
+        parts.append("(no occurrences)")
+        return "\n".join(parts) + "\n"
+
+    if limit and limit < len(rels_all):
+        parts.append(f"Latest {len(rels)} of {len(rels_all)} occurrences")
+    else:
+        parts.append(f"All {len(rels)} occurrences")
+    parts.append("")
+
+    for i, r in enumerate(rels):
+        date = (getattr(r, "date_str", None) or "no date").strip()
+        imp = getattr(r, "importance", None) or "?"
+        title = getattr(r, "title", "") or ""
+        raw = (getattr(r, "raw_block", "") or "").rstrip("\n")
+        period = getattr(r, "reference_period", None)
+        head_bits = [f"{date} | {imp}"]
+        if period:
+            head_bits.append(f"period {period}")
+        parts.append(" | ".join(head_bits))
+        parts.append(title)
+        parts.append("")
+        parts.append(raw)
+        if i < len(rels) - 1:
+            parts.append("")
+            parts.append(_EXPORT_SEPARATOR)
+            parts.append("")
+    return "\n".join(parts) + "\n"
+
+
+def _export_filename(country, release_name):
+    safe = f"{country}_{release_name}".replace("/", "-").replace(" ", "_")
+    safe = "".join(c for c in safe if c.isalnum() or c in "-_.")
+    return f"{safe or 'export'}.txt"
+
+
 def _catalogue_dedup(releases):
     """Drop duplicates by catalogue_key, keeping the FIRST occurrence.
 
@@ -727,6 +782,30 @@ def tab_country_release_catalogue():
         f"Occurrences in archive: `{len(rels)}`"
     )
 
+    # Export panel: latest N occurrences as one LLM-ready text blob.
+    exp_cols = st.columns([1, 1, 2])
+    limit_options = [3, 4, 6, "All"]
+    limit_choice = exp_cols[0].selectbox(
+        "Export count",
+        options=limit_options,
+        index=1,  # default = 4
+        key="cc_export_limit",
+        help="Number of latest occurrences (sorted by reference period) "
+             "to include in the export.",
+    )
+    limit = None if limit_choice == "All" else int(limit_choice)
+    export_text = format_release_export(country, selected_name, rels, limit=limit)
+    exp_cols[1].download_button(
+        "Download .txt",
+        data=export_text,
+        file_name=_export_filename(country, selected_name),
+        mime="text/plain",
+        key="cc_export_download",
+        use_container_width=True,
+    )
+    with st.expander("Show export text (click to copy)", expanded=False):
+        st.code(export_text, language="text", wrap_lines=True)
+
     compare = st.checkbox(
         "Compare latest vs previous side-by-side",
         value=False, key="cc_compare",
@@ -804,6 +883,7 @@ _SCOPE_RESET_KEYS = (
     # Country Release Catalogue
     "cc_country", "cc_themes", "cc_search", "cc_include_live",
     "cc_only_known", "cc_table", "cc_compare",
+    "cc_export_limit",
 )
 
 
@@ -841,6 +921,15 @@ def _handle_scope_change(scope):
     """
     prev = st.session_state.get("_prev_scope")
     if prev is None:
+        # First render: don't reset tab state (user may have just typed a
+        # query or selected a row), but DO seed the catalogue country so
+        # the Catalogue tab opens on the sidebar scope's representative
+        # country (USD -> US, EUR -> Eurozone, GBP -> UK ...) rather than
+        # falling back to the alphabetical-first option.
+        if "cc_country" not in st.session_state:
+            seeded = default_catalogue_country(scope)
+            if seeded:
+                st.session_state["cc_country"] = seeded
         st.session_state["_prev_scope"] = scope
         return False
     if prev == scope:
