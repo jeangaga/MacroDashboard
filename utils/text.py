@@ -218,3 +218,69 @@ def any_keyword(text, keywords):
         return False
     lower = text.lower()
     return any(kw.lower() in lower for kw in keywords)
+
+
+# ---------------------------------------------------------------------------
+# Reference-period extraction
+# ---------------------------------------------------------------------------
+# Catalogue grouping needs to know WHICH period a release describes (e.g. CPI
+# "for March"), independent of the release/publication date. The signal lives
+# in the trailing parenthesized token of the title.
+#
+#   "United States - Retail Sales MM (Mar)"  -> "2026-03"
+#   "Australia - GDP (Q1)"                   -> "2026-Q1"
+#   "Eurozone - HICP Final YY"               -> None (no period token)
+#
+# Year is inferred from `release_date`. Year-rollover heuristic: if the
+# parenthesized month is greater than `release_date.month`, the print is
+# describing the prior calendar year (e.g. "(Dec)" published in Jan).
+
+_REF_MONTH_TOKENS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+_REF_PARENS_RE = re.compile(r"\(([^)]+)\)")
+_REF_QUARTER_RE = re.compile(r"^\s*Q\s*([1-4])\s*$", re.I)
+
+
+def extract_reference_period(title, release_date=None):
+    """Return the reference period implied by a release title.
+
+    Returns:
+        "YYYY-MM" for a (Mon) token,
+        "YYYY-QX" for a (Q1)..(Q4) token,
+        None if no recognizable period token is present.
+
+    Year is inferred from `release_date.year`. When the parenthesized month
+    is greater than release_date.month we subtract a year (e.g. "(Dec)"
+    published in Jan -> previous year).
+    """
+    if not title:
+        return None
+    year = release_date.year if release_date is not None else None
+    for m in _REF_PARENS_RE.finditer(title):
+        token = m.group(1).strip()
+        if not token:
+            continue
+        # Quarter: "Q1", "Q 1", "q4"
+        qm = _REF_QUARTER_RE.match(token)
+        if qm:
+            if year is None:
+                return None
+            return f"{year}-Q{qm.group(1)}"
+        # Month: take the FIRST month-like word in the token. This handles
+        # "Mar", "March", "Mar P", "Mar F" (preliminary/final markers), and
+        # "Mar/Feb" (revision: latest period wins via first word).
+        first_word = re.split(r"[\s/,;]+", token, 1)[0].lower()
+        first_word = first_word.rstrip(".")
+        mi = _REF_MONTH_TOKENS.get(first_word) or _REF_MONTH_TOKENS.get(first_word[:3])
+        if mi is None:
+            continue
+        if year is None:
+            return None
+        ref_year = year
+        if release_date is not None and mi > release_date.month:
+            ref_year = year - 1
+        return f"{ref_year}-{mi:02d}"
+    return None
