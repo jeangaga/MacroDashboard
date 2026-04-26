@@ -199,7 +199,7 @@ COUNTRY_ALIASES = {
     "Switzerland": ["Switzerland", "Swiss", "SNB", "CHF"],
     "Norway":      ["Norway", "Norwegian", "Norges", "NOK"],
     "Sweden":      ["Sweden", "Swedish", "Riksbank", "SEK"],
-    "Eurozone":    ["Eurozone", "Euro area", "Euro Area", "EA "],
+    "Eurozone":    ["Eurozone", "Euro Zone", "Euro zone", "Euro area", "Euro Area", "EA "],
     "Taiwan":      ["Taiwan", "TWD"],
     "South Africa": ["South Africa", "ZAR", "SARB"],
 }
@@ -333,36 +333,3 @@ def default_catalogue_country(scope):
             return c
     return None
 
-
-# ---------------------------------------------------------------------------
-# Scope -> default catalogue country
-# ---------------------------------------------------------------------------
-# When the sidebar scope changes, the Catalogue tab's country selector must
-# reset to a representative country for the new scope. Region scopes pick a
-# regional default; currency scopes fall back to their single country.
-
-_SCOPE_DEFAULT_COUNTRY_OVERRIDES = {
-    # Regional shortcut: the "Eurozone" pseudo-country pulls EUR_WEEK.txt
-    # without committing to any one euro member.
-    "EUR": "Eurozone",
-    "DM":  "UK",
-    "EM":  "China",
-}
-
-
-def default_catalogue_country(scope):
-    """Pick a representative catalogue country for the given sidebar scope.
-
-    Returns None when the scope has no countries (e.g. PM/shared scopes), so
-    callers can leave the catalogue selection alone in that case.
-    """
-    if not scope:
-        return None
-    if scope in _SCOPE_DEFAULT_COUNTRY_OVERRIDES:
-        c = _SCOPE_DEFAULT_COUNTRY_OVERRIDES[scope]
-        if c in COUNTRY_SOURCE_PRIORITY:
-            return c
-    for c in SCOPE_COUNTRIES.get(scope, []):
-        if c in COUNTRY_SOURCE_PRIORITY:
-            return c
-    return None

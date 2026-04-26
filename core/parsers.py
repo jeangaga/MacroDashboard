@@ -312,6 +312,23 @@ _COMMENTARY_PREFIXES = (
     "foreign-led only",
     "the question is",
     "looking ahead",
+    # Analyst stub-prefixes that polluted release titles in older note
+    # versions. These never start a real release header.
+    "jgm note",
+    "gating:",
+    "signal:",
+    "signal tension",
+    "takeaway:",
+    "macro configuration",
+    "it does not",
+    "this does not",
+    "the print",
+    "the release",
+    "the broader",
+    "the key",
+    "in short",
+    "helps keep",
+    "supports ",
 )
 
 # Narrative phrases that strongly suggest a sentence is prose commentary,
@@ -455,6 +472,16 @@ def _inject_release_boundaries(text):
 
 
 def _looks_like_preamble(paragraph):
+    """A paragraph qualifies as a release preamble ONLY when its first
+    non-empty line itself looks like a real release title, i.e. has BOTH
+    a country prefix AND a dash-indicator structure.
+
+    Older versions accepted any title-passing line under 120 chars, which
+    promoted analyst stubs ("Gating: next retail print determines whether
+    this is a trend or a pull-forward payback.", "Helps keep the cuts
+    later in year scenario alive...") into release titles. The fall-back
+    to length is intentionally removed.
+    """
     if not paragraph:
         return False
     line = ""
@@ -464,11 +491,11 @@ def _looks_like_preamble(paragraph):
             break
     if not _looks_like_title_line(line):
         return False
-    if any(sep in line for sep in (" \u2014 ", " \u2013 ", " - ", " -- ")):
-        return True
-    if country_from_title(line):
-        return True
-    return len(line) <= 120
+    if not _TITLE_DASH_RE.search(line):
+        return False
+    if not country_from_title(line):
+        return False
+    return True
 
 
 def extract_releases(block):
@@ -560,7 +587,18 @@ def extract_releases(block):
         if not _has_release_signals(full_text):
             continue
 
-        title = _best_title_line(title_source)
+        # Title preference order:
+        #   1. The flagged release paragraph (header_for_flag) -- this is the
+        #      paragraph carrying Release Date / Importance, so its first
+        #      country-dashed line is the canonical title.
+        #   2. The preamble paragraph (title_source != header_for_flag).
+        #   3. Any other paragraph in the group, scanned in order.
+        # Older versions ran (2) first, which let analyst stubs ("Gating: ...",
+        # "JGM note: ...") hijack the title when they happened to pass the
+        # title-line check.
+        title = _best_title_line(header_for_flag)
+        if not title and title_source is not header_for_flag:
+            title = _best_title_line(title_source)
         if not title:
             for para in group:
                 cand = _best_title_line(para)
@@ -597,12 +635,27 @@ def extract_releases(block):
 
 
 def _best_title_line(paragraph):
+    """Pick the best release-title line from a paragraph.
+
+    Two-pass:
+      1. Scan for a strict country-dashed release title
+         (_looks_like_release_title). This is the canonical release header
+         and must always win when present, even if it isn't the first line
+         of the paragraph.
+      2. Fall back to any line that passes the looser title-line check
+         (_looks_like_title_line).
+
+    Older versions ran (2) only, which let commentary lines that happened
+    to mention a country (e.g. "Markets can read this as relative German
+    resilience...") outrank the real release title that followed.
+    """
     if not paragraph:
         return ""
-    for raw in paragraph.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
+    candidates = [raw.strip() for raw in paragraph.splitlines() if raw.strip()]
+    for line in candidates:
+        if _looks_like_release_title(line):
+            return line
+    for line in candidates:
         if _looks_like_title_line(line):
             return line
     return ""
