@@ -35,6 +35,7 @@ from core.normalize import (
 from core.parsers import (
     block_data_window,
     extract_blocks,
+    extract_macro_note_blocks,
     extract_releases,
     releases_from_load_results,
 )
@@ -355,10 +356,12 @@ def tab_macro_notes(state):
         st.info(f"No content available for `{filename}`.")
         return
 
-    # extract_blocks(split_weekly=True) already splits each marker block by
-    # any embedded "Data window:" line, which is exactly the version unit
-    # we want here. Each annotated tuple is (block, label, start, end, idx).
-    blocks = extract_blocks(result.text, source_file=result.filename)
+    # Macro notes: each <<STEM_BEGIN>>...<<STEM_END>> pair is ONE complete
+    # note version. Inner "Data window:" lines (e.g. a table of historical
+    # windows in the body) are metadata, NOT body-split points. The
+    # extractor uses the LATEST Data window: line as the block's primary
+    # window for chronological sorting.
+    blocks = extract_macro_note_blocks(result.text, source_file=result.filename)
     versions = _macro_note_versions(blocks)
     if not versions:
         st.info(f"No note versions parsed from `{filename}`.")
