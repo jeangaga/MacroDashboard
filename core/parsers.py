@@ -705,6 +705,55 @@ def block_data_window(block):
     return (label, s, e)
 
 
+_TOP_SECTION_RE = re.compile(r"^([A-D])\.\s+(.+)$")
+
+
+def split_top_level_sections(block_raw_text):
+    """Split a block's raw_text by top-level letter-prefixed sections
+    (`A. ...`, `B. ...`, `C. ...`, `D. ...`).
+
+    Each weekly note is structured as:
+        A. ... MACRO SYNTHESIS         -- prose
+        B. ... SIGNAL SCOREBOARD       -- Growth/Labor/Inflation/...
+        C. FULL RELEASE ARCHIVE        -- the actual releases (already
+                                          rendered in Weekly Monitor)
+        D. ... (optional)
+
+    This helper is letter-only (A through D), so a stray line like
+    `Q4. revisions ...` will not be confused for a section header.
+    Header line itself is included in the returned `header` field; the
+    `body` is everything from after the header up to (but not including)
+    the next top-level section header or end of text.
+
+    Returns ordered list of (letter, header_line, body) tuples.
+    """
+    if not block_raw_text:
+        return []
+    lines = block_raw_text.splitlines()
+    sections = []
+    current_letter = None
+    current_header = None
+    current_body = []
+    for line in lines:
+        stripped = line.strip()
+        m = _TOP_SECTION_RE.match(stripped) if stripped else None
+        if m:
+            if current_letter is not None:
+                sections.append(
+                    (current_letter, current_header, "\n".join(current_body).rstrip())
+                )
+            current_letter = m.group(1).upper()
+            current_header = stripped
+            current_body = []
+        elif current_letter is not None:
+            current_body.append(line)
+    if current_letter is not None:
+        sections.append(
+            (current_letter, current_header, "\n".join(current_body).rstrip())
+        )
+    return sections
+
+
 def extract_macro_note_blocks(text, source_file):
     """Macro-note-specific extractor.
 
