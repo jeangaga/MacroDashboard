@@ -18,8 +18,10 @@ from utils.text import (
     collapse_blank_lines,
     country_from_title,
     detect_themes,
+    extract_reference_period,
     first_date_string,
     max_importance,
+    parse_release_date,
 )
 
 
@@ -146,6 +148,12 @@ class Release:
     countries: list = field(default_factory=list)
     themes: list = field(default_factory=list)
     raw_block: str = ""
+    # Reference period the release describes (e.g. "2026-03" for CPI (Mar),
+    # "2026-Q1" for GDP (Q1)). Independent of release/publication date.
+    # None when the title carries no recognizable period token. Used as the
+    # catalogue grouping anchor so a delayed revision can't outrank a fresh
+    # print for an earlier reference period.
+    reference_period: Optional[str] = None
 
     @property
     def importance_rank(self) -> int:
@@ -479,6 +487,12 @@ def extract_releases(block):
         date_str = first_date_string(full_text)
         countries = country_from_title(title)
         themes = detect_themes(full_text)
+        # Reference period: what the release describes ("Mar", "Q1", ...),
+        # not when it was published. Year is inferred from the parsed
+        # release date so the catalogue can sort/dedup by period rather
+        # than by publication date.
+        release_date = parse_release_date(date_str) if date_str else None
+        reference_period = extract_reference_period(title, release_date)
         releases.append(Release(
             source_file=block.source_file,
             block_stem=block.stem,
@@ -490,6 +504,7 @@ def extract_releases(block):
             countries=countries,
             themes=themes,
             raw_block=collapse_blank_lines(full_text),
+            reference_period=reference_period,
         ))
     return releases
 

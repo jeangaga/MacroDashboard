@@ -178,3 +178,27 @@ def dedup_releases(releases):
         seen.add(k)
         out.append(r)
     return out
+
+
+def catalogue_key(release) -> str:
+    """Catalogue dedup key: country | normalized_name | reference_period.
+
+    Different from `release_key` (which keys events by date+importance for
+    Weekly-Monitor-style true-event dedup). The catalogue groups recurring
+    releases by what they describe, not when they were published, so two
+    parses of the same period (e.g. live first, frozen later) collapse into
+    a single occurrence even if the release date or importance flag drifts.
+
+    Returns "" when reference_period is missing — caller should treat that
+    as "do not collapse this row".
+    """
+    if release is None:
+        return ""
+    country = ""
+    if getattr(release, "countries", None):
+        country = release.countries[0] or ""
+    name, _theme, _conf = normalize_release_name(getattr(release, "title", "") or "")
+    ref = getattr(release, "reference_period", "") or ""
+    if not ref:
+        return ""
+    return f"{country}|{name}|{ref}"
