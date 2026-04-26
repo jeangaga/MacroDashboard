@@ -26,7 +26,12 @@ from core.config import (
     sources_for_country,
 )
 from core.loaders import LoadResult, load_file, load_many
-from core.normalize import dedup_releases, normalize_release_name, release_key
+from core.normalize import (
+    catalogue_key,
+    dedup_releases,
+    normalize_release_name,
+    release_key,
+)
 from core.parsers import (
     block_data_window,
     extract_blocks,
@@ -702,6 +707,41 @@ def _release_sort_key(r):
     return d or _dt.date.min
 
 
+def _catalogue_sort_key(r):
+    """Catalogue chronology sorts by reference period (what the release
+    describes), with the publication date as a tiebreak.
+
+    Period-less releases sink to the bottom so a delayed publication for
+    Mar can never outrank a fresh print for Apr. The publication date is
+    used only to break ties between releases for the same period (e.g.
+    a frozen vs live read of the same Mar CPI).
+    """
+    period = getattr(r, "reference_period", None) or ""
+    pub = parse_release_date(r.date_str) or _dt.date.min
+    return (period, pub)
+
+
+def _catalogue_dedup(releases):
+    """Drop duplicates by catalogue_key, keeping the FIRST occurrence.
+
+    Caller must order `releases` so the preferred occurrence comes first
+    (e.g. frozen before live -- the catalogue does this by ordering
+    `allowed_files` frozen-first). Releases whose `catalogue_key` is empty
+    (no reference_period) are kept as-is so we never collapse two unrelated
+    releases just because their period couldn't be inferred.
+    """
+    seen = set()
+    out = []
+    for r in releases or []:
+        k = catalogue_key(r)
+        if k:
+            if k in seen:
+                continue
+            seen.add(k)
+        out.append(r)
+    return out
+
+
 def tab_country_release_catalogue():
     """Per-country index of recurring releases. Click a row to see latest +
     previous occurrences, with optional latest-vs-previous compare."""
@@ -786,11 +826,14 @@ def tab_country_release_catalogue():
         st.info(f"No releases tagged with {country} in the allowed source files.")
         return
 
-    # Dedup by stable key. When the same release appears in both frozen and
-    # live files for the same date/importance, frozen wins because frozen
-    # files come first in `allowed_files` and dedup_releases keeps the FIRST
-    # occurrence.
-    country_releases = dedup_releases(country_releases)
+    # Catalogue dedup uses (country, normalized_name, reference_period) so
+    # two parses of the same Mar CPI (frozen + live, possibly with different
+    # importance flags) collapse into one occurrence. Frozen wins because
+    # frozen files come first in `allowed_files` and _catalogue_dedup keeps
+    # the FIRST occurrence. Releases with no reference_period are kept
+    # un-collapsed (we never merge unrelated releases just because the
+    # period couldn't be inferred from the title).
+    country_releases = _catalogue_dedup(country_releases)
 
     groups = {}
     meta = {}
@@ -802,7 +845,6 @@ def tab_country_release_catalogue():
             continue
         if theme_filter and theme not in theme_filter:
             continue
-            continue
         groups.setdefault(name, []).append(r)
         if name not in meta:
             meta[name] = (theme, conf)
@@ -813,7 +855,11 @@ def tab_country_release_catalogue():
 
     rows = []
     for name, rels in groups.items():
-        rels_sorted = sorted(rels, key=_release_sort_key, reverse=True)
+        # Sort by reference period (what the release describes), with the
+        # publication date as a tiebreak. The row's "latest" is therefore
+        # the freshest reference period available, not whichever block was
+        # published last.
+        rels_sorted = sorted(rels, key=_catalogue_sort_key, reverse=True)
         latest = rels_sorted[0]
         regions = sorted({(r.region or "-") for r in rels})
         files = sorted({r.source_file for r in rels})
@@ -823,6 +869,7 @@ def tab_country_release_catalogue():
             "Theme": theme or "-",
             "Conf": _CONFIDENCE_ICON.get(conf, conf),
             "Occurrences": len(rels),
+            "Latest period": latest.reference_period or "-",
             "Latest date": latest.date_str or "-",
             "Imp": latest.importance or "-",
             "Regions": ", ".join(regions),
@@ -852,7 +899,9 @@ def tab_country_release_catalogue():
         return
 
     selected_name = rows[selected_idx[0]]["Release"]
-    rels = sorted(groups[selected_name], key=_release_sort_key, reverse=True)
+    # Same chronology rule as the table: latest reference period first, with
+    # publication date as the tiebreak.
+    rels = sorted(groups[selected_name], key=_catalogue_sort_key, reverse=True)
 
     st.divider()
     theme, conf = meta[selected_name]
