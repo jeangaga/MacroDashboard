@@ -330,6 +330,23 @@ _NARRATIVE_PHRASES = (
 )
 
 
+# Synthesis-section dividers used in the new MACRO SYNTHESIS / SCOREBOARD /
+# FULL RELEASE ARCHIVE format. Lines like "A. US WEEK — MACRO SYNTHESIS",
+# "B. US MACRO SIGNAL SCOREBOARD", "C. FULL RELEASE ARCHIVE" must NEVER be
+# treated as release titles, otherwise the first release in the archive
+# inherits the synthesis header.
+_SYNTHESIS_HEADER_RE = re.compile(
+    r"^\s*[A-D]\.\s+.+\b(?:SYNTHESIS|SCOREBOARD|ARCHIVE|SIGNAL\s+SCOREBOARD)\b",
+    re.I,
+)
+
+
+def _is_synthesis_header_line(line):
+    if not line:
+        return False
+    return bool(_SYNTHESIS_HEADER_RE.match((line or "").strip()))
+
+
 def _looks_like_commentary_fragment(line):
     """True when the line looks like prose / commentary, not a release title."""
     s = (line or "").strip()
@@ -361,6 +378,10 @@ def _looks_like_title_line(line):
         return False
     if _is_day_header_line(s):
         return False
+    if _is_synthesis_header_line(s):
+        # Synthesis dividers ("A. ... MACRO SYNTHESIS", "B. ... SCOREBOARD",
+        # "C. FULL RELEASE ARCHIVE") are section headers, never release titles.
+        return False
     low = s.lower()
     for p in _TITLE_SKIP_PREFIXES:
         if low.startswith(p):
@@ -370,6 +391,67 @@ def _looks_like_title_line(line):
     if _looks_like_commentary_fragment(s):
         return False
     return True
+
+
+def _looks_like_release_title(line):
+    """Stricter than _looks_like_title_line: also requires a country-prefixed
+    dashed title pattern. Used by the boundary-injection pre-pass to find
+    release starts inside dense, blank-line-less blocks.
+    """
+    s = (line or "").strip()
+    if not s:
+        return False
+    if _is_synthesis_header_line(s):
+        return False
+    if _is_day_header_line(s):
+        return False
+    if _looks_like_commentary_fragment(s):
+        return False
+    if not _TITLE_DASH_RE.search(s):
+        return False
+    if not country_from_title(s):
+        return False
+    return True
+
+
+def _inject_release_boundaries(text):
+    """When a block packs multiple releases per paragraph (no blank lines
+    between them), insert blank lines before each release boundary so the
+    paragraph-based splitter can see them.
+
+    A boundary is:
+      - A line that looks like a release title (country-dashed, not a
+        synthesis header), AND
+      - one of the next ~6 lines contains 'Release Date:'.
+
+    Already-blank-separated boundaries are not duplicated. If the block
+    already has roughly one blank line per release the function is a no-op,
+    so the older format keeps working unchanged.
+    """
+    if not text or "Release Date:" not in text:
+        return text
+    rd_count = text.count("Release Date:")
+    blank_paragraphs = len(re.findall(r"\n\s*\n", text))
+    # If the block already has at least one blank line per release, the
+    # existing paragraph splitter is fine. (We still run for single-release
+    # blocks because a synthesis preamble in the same paragraph as the
+    # release can leak into the title without the boundary insert.)
+    if rd_count and blank_paragraphs >= rd_count:
+        return text
+    lines = text.split("\n")
+    out = []
+    n = len(lines)
+    for i, line in enumerate(lines):
+        boundary = False
+        if _looks_like_release_title(line):
+            for j in range(i + 1, min(n, i + 7)):
+                if "Release Date:" in lines[j]:
+                    boundary = True
+                    break
+        if boundary and out and out[-1].strip():
+            out.append("")
+        out.append(line)
+    return "\n".join(out)
 
 
 def _looks_like_preamble(paragraph):
@@ -402,7 +484,12 @@ def extract_releases(block):
     """
     if not block or not block.raw_text:
         return []
-    paragraphs = _PARAGRAPH_SPLIT.split(block.raw_text)
+    # Some weekly archives pack multiple releases per block with no blank
+    # lines between them (the new MACRO SYNTHESIS / SCOREBOARD / FULL
+    # RELEASE ARCHIVE format). Inject blank lines before each release
+    # boundary so the paragraph splitter sees them as distinct paragraphs.
+    raw_text = _inject_release_boundaries(block.raw_text)
+    paragraphs = _PARAGRAPH_SPLIT.split(raw_text)
 
     groups = []
     current = None
@@ -542,8 +629,6 @@ def block_data_window(block):
     earliest/latest parsed release dates inside the block. Returns
     (label, None, None) when nothing is available.
     """
-    from utils.text import parse_release_date
-
     if block is None:
         return ("", None, None)
     if block.data_window:
