@@ -154,18 +154,12 @@ def sidebar():
         help="Pick any combination of importance levels (* through ****).",
     )
 
-    st.sidebar.subheader("Themes")
-    themes = st.sidebar.multiselect(
-        "Themes", options=ALL_THEMES, default=[], label_visibility="collapsed",
-        key="sb_themes",
-    )
-
     st.sidebar.subheader("Time window")
     time_window = st.sidebar.selectbox(
         "Time window",
         options=TIME_WINDOWS, index=0, label_visibility="collapsed",
         key="sb_time_window",
-        help="Filter Release Search and Theme Monitor to this window.",
+        help="Filter results to this window.",
     )
 
     st.sidebar.divider()
@@ -179,7 +173,6 @@ def sidebar():
         "scope": scope,
         "view": view,
         "levels": levels,
-        "themes": themes,
         "time_window": time_window,
     }
 
@@ -221,14 +214,6 @@ def command_bar():
         help_clicked = cols[2].button("?", use_container_width=True, help="Show command syntax", key="cmd_help")
         clear_clicked = cols[3].button("Clear", use_container_width=True, help="Clear active command", key="cmd_clear")
 
-        deep = st.checkbox(
-            "Search inside full raw text",
-            value=False,
-            key="cmd_deep_search",
-            help="Off (default): match keywords against title, country, theme, scope, and indicator only. "
-                 "On: also scan the full raw block (slower, more false positives).",
-        )
-
         if help_clicked:
             st.session_state["show_cmd_help"] = not st.session_state["show_cmd_help"]
         if clear_clicked:
@@ -239,13 +224,8 @@ def command_bar():
     if go and cmd.strip():
         parsed = parse_command(cmd)
         parsed["_raw"] = cmd.strip()
-        parsed["_deep_search"] = deep
         st.session_state["active_command"] = parsed
         return parsed
-    active = dict(st.session_state["active_command"])
-    if active:
-        active["_deep_search"] = deep
-        st.session_state["active_command"] = active
     return st.session_state["active_command"]
 
 
@@ -289,7 +269,6 @@ def render_command_results(command_state, sidebar_state):
     if "min_importance" not in relevant and sidebar_state.get("levels"):
         extra["levels"] = sidebar_state["levels"]
     extra["since"] = time_window_to_since(sidebar_state.get("time_window"))
-    extra["deep_search"] = bool(command_state.get("_deep_search"))
 
     filtered = filter_releases(all_releases, **relevant, **extra)
     render_release_list(filtered, limit=100, empty_message="No releases match this command.")
@@ -533,169 +512,6 @@ def tab_macro_notes(state):
         prefix = "Latest" if j == 0 else "Previous"
         with st.expander(f"{prefix}  -  Data window: {label}", expanded=False):
             st.code(blk.raw_text, language="text", wrap_lines=True)
-
-
-def tab_release_search(sidebar_state, command_state):
-    st.header("Release Search")
-    all_results = _load_many(ALL_NOTE_FILES)
-    render_load_status(all_results)
-    all_releases = releases_from_load_results(all_results)
-
-    if not all_releases:
-        st.info("No releases parsed yet.")
-        return
-
-    default_scopes = [sidebar_state["scope"]] if sidebar_state["scope"] else []
-    seeded_query = command_state.get("query", "")
-    seeded_regions = command_state.get("regions", default_scopes) or default_scopes
-    seeded_themes = command_state.get("themes", sidebar_state["themes"]) or sidebar_state["themes"]
-    seeded_levels = sidebar_state["levels"]
-    if command_state.get("min_importance"):
-        target = command_state["min_importance"]
-        order = ["*", "**", "***", "****"]
-        seeded_levels = [x for x in order if len(x) >= len(target)]
-
-    with st.container(border=True):
-        cols = st.columns([3, 2, 2])
-        query = cols[0].text_input(
-            "Keyword search", value=seeded_query,
-            placeholder="Australia CPI | labor US | RBA minutes",
-            key="rs_query",
-        )
-        scope_filter = cols[1].multiselect(
-            "Scopes", options=ALL_SCOPES, default=seeded_regions,
-            format_func=_scope_label, key="rs_scopes",
-        )
-        themes_filter = cols[2].multiselect(
-            "Themes", options=ALL_THEMES, default=seeded_themes,
-            key="rs_themes",
-        )
-
-        cols2 = st.columns([2, 2, 2])
-        levels_filter = cols2[0].multiselect(
-            "Importance levels", options=IMPORTANCE_LEVELS_UI, default=seeded_levels,
-            key="rs_levels",
-        )
-        time_window_filter = cols2[1].selectbox(
-            "Time window", options=TIME_WINDOWS,
-            index=TIME_WINDOWS.index(sidebar_state["time_window"])
-                  if sidebar_state["time_window"] in TIME_WINDOWS else 0,
-            key="rs_window",
-        )
-        rtype_universe = release_types_for(all_releases, scopes=scope_filter or None)
-        rtypes_filter = cols2[2].multiselect(
-            "Release type", options=rtype_universe, default=[],
-            key="rs_rtypes",
-            help="Pick CPI / NFIB / Retail Sales etc. to see all historical instances.",
-        )
-
-    countries_options = sorted({
-        c for s in (scope_filter or ALL_SCOPES) for c in SCOPE_COUNTRIES.get(s, [])
-    })
-    cols3 = st.columns([3, 2])
-    countries_filter = cols3[0].multiselect(
-        "Countries", options=countries_options, default=[], key="rs_countries",
-    )
-    deep_search = cols3[1].checkbox(
-        "Search inside full raw text",
-        value=False,
-        key="rs_deep_search",
-        help="Off (default): keyword matches title, country, theme, scope, and indicator only. "
-             "On: also scan the full raw block.",
-    )
-
-    since = time_window_to_since(time_window_filter)
-
-    results = filter_releases(
-        all_releases,
-        query=query,
-        regions=scope_filter,
-        levels=levels_filter,
-        themes=themes_filter,
-        countries=countries_filter,
-        release_types=rtypes_filter,
-        since=since,
-        deep_search=deep_search,
-    )
-
-    st.divider()
-    view_cols = st.columns([1, 3])
-    view_mode = view_cols[0].radio(
-        "View", options=["Cards", "Table"], horizontal=True, label_visibility="collapsed",
-        key="rs_view_mode",
-    )
-    if view_mode == "Cards":
-        render_release_list(results, limit=200)
-    else:
-        df = releases_to_dataframe(results)
-        if df.empty:
-            st.info("No matching releases.")
-        else:
-            display_df = df[[
-                "importance", "region", "release_type", "title", "date_str",
-                "countries_str", "themes_str", "source_file",
-            ]].rename(columns={
-                "importance": "Imp", "region": "Scope", "release_type": "Type",
-                "title": "Title", "date_str": "Date",
-                "countries_str": "Countries", "themes_str": "Themes",
-                "source_file": "File",
-            })
-            st.dataframe(display_df, use_container_width=True, height=480)
-
-
-def tab_theme_monitor(sidebar_state):
-    st.header("Theme Monitor")
-    st.caption("Pick a theme (Inflation, Growth, Labor...) for a focused recap with time window + release-type filters.")
-
-    all_results = _load_many(ALL_NOTE_FILES)
-    render_load_status(all_results)
-    all_releases = releases_from_load_results(all_results)
-    if not all_releases:
-        st.info("No releases to filter yet.")
-        return
-
-    cols = st.columns([2, 2, 2])
-    default_theme = (sidebar_state["themes"] or ["Inflation"])[0] if "Inflation" in ALL_THEMES else ALL_THEMES[0]
-    theme = cols[0].selectbox(
-        "Theme", options=ALL_THEMES,
-        index=ALL_THEMES.index(default_theme) if default_theme in ALL_THEMES else 0,
-        key="tm_theme",
-    )
-    time_window_filter = cols[1].selectbox(
-        "Time window", options=TIME_WINDOWS,
-        index=TIME_WINDOWS.index(sidebar_state["time_window"])
-              if sidebar_state["time_window"] in TIME_WINDOWS else 1,
-        key="tm_window",
-    )
-    levels_filter = cols[2].multiselect(
-        "Importance levels", options=IMPORTANCE_LEVELS_UI,
-        default=sidebar_state["levels"] or ["***", "****"], key="tm_levels",
-    )
-
-    cols2 = st.columns([2, 2])
-    scope_filter = cols2[0].multiselect(
-        "Scopes", options=ALL_SCOPES,
-        default=[sidebar_state["scope"]] if sidebar_state["scope"] else [],
-        format_func=_scope_label, key="tm_scopes",
-    )
-    countries_options = sorted({
-        c for s in (scope_filter or ALL_SCOPES) for c in SCOPE_COUNTRIES.get(s, [])
-    })
-    countries_filter = cols2[1].multiselect(
-        "Countries", options=countries_options, default=[], key="tm_countries",
-    )
-
-    base = theme_releases(all_releases, theme)
-    since = time_window_to_since(time_window_filter)
-    filtered = filter_releases(
-        base,
-        regions=scope_filter,
-        levels=levels_filter,
-        countries=countries_filter,
-        since=since,
-    )
-    st.caption(f"Theme `{theme}`  |  window `{time_window_filter}`  |  {len(filtered)} release(s).")
-    render_release_list(filtered, limit=200)
 
 
 _CONFIDENCE_ICON = {"High": "H", "Medium": "M", "Low": "L"}
@@ -985,11 +801,6 @@ def tab_country_release_catalogue():
 _SCOPE_RESET_KEYS = (
     # Macro Notes
     "mn_select", "mn_view_mode",
-    # Release Search
-    "rs_query", "rs_scopes", "rs_themes", "rs_levels", "rs_window",
-    "rs_rtypes", "rs_countries", "rs_deep_search", "rs_view_mode",
-    # Theme Monitor
-    "tm_theme", "tm_window", "tm_levels", "tm_scopes", "tm_countries",
     # Country Release Catalogue
     "cc_country", "cc_themes", "cc_search", "cc_include_live",
     "cc_only_known", "cc_table", "cc_compare",
@@ -1054,19 +865,14 @@ def main():
     command_state = command_bar()
     render_command_results(command_state, state)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Weekly Monitor", "Macro Notes", "Release Search", "Theme Monitor",
-        "Country Release Catalogue",
+    tab1, tab2, tab3 = st.tabs([
+        "Weekly Monitor", "Macro Notes", "Country Release Catalogue",
     ])
     with tab1:
         tab_weekly_monitor(state)
     with tab2:
         tab_macro_notes(state)
     with tab3:
-        tab_release_search(state, command_state)
-    with tab4:
-        tab_theme_monitor(state)
-    with tab5:
         tab_country_release_catalogue()
 
 
