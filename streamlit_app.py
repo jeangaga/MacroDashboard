@@ -46,14 +46,7 @@ from core.render import (
     render_release_list,
     source_badge,
 )
-from core.search import (
-    filter_releases,
-    parse_command,
-    release_types_for,
-    releases_to_dataframe,
-    theme_releases,
-    time_window_to_since,
-)
+from core.search import filter_releases
 from utils.text import parse_release_date
 
 st.set_page_config(
@@ -177,103 +170,6 @@ def sidebar():
     }
 
 
-_CMD_HELP = """
-**Command syntax** - any combination, order doesn't matter.
-
-| Type | Effect |
-|---|---|
-| `CPI US` | Keyword `CPI`, scope `USD` |
-| `CPI Australia` | Keyword `CPI`, scope `AUD` |
-| `inflation EM` | Theme `Inflation`, scope `EM` |
-| `**** inflation EM` | Importance `****`, theme `Inflation`, scope `EM` |
-| `QUICK EUR` | All `***+` releases for EUR |
-| `QUICK2US` | All `****` releases for USD |
-| `labor Japan` | Theme `Labor`, scope `JPY` |
-
-**Aliases** - `US`=`USD`, `UK`=`GBP`, `EU`=`EUR`, `Japan`=`JPY`, `China`=`CNH`,
-`Brazil`=`BRL`, `Australia`=`AUD`, etc.
-
-Sidebar `Importance` and `Time window` ALSO apply to command results.
-""".strip()
-
-
-def command_bar():
-    if "active_command" not in st.session_state:
-        st.session_state["active_command"] = {}
-    if "show_cmd_help" not in st.session_state:
-        st.session_state["show_cmd_help"] = False
-
-    with st.container(border=True):
-        cols = st.columns([6, 1, 1, 1])
-        cmd = cols[0].text_input(
-            "Command", value="", label_visibility="collapsed",
-            placeholder="CPI US  |  **** inflation EM  |  QUICK EUR  |  labor Japan",
-            key="cmd_input",
-        )
-        go = cols[1].button("Run", use_container_width=True, key="cmd_run")
-        help_clicked = cols[2].button("?", use_container_width=True, help="Show command syntax", key="cmd_help")
-        clear_clicked = cols[3].button("Clear", use_container_width=True, help="Clear active command", key="cmd_clear")
-
-        if help_clicked:
-            st.session_state["show_cmd_help"] = not st.session_state["show_cmd_help"]
-        if clear_clicked:
-            st.session_state["active_command"] = {}
-        if st.session_state["show_cmd_help"]:
-            st.markdown(_CMD_HELP)
-
-    if go and cmd.strip():
-        parsed = parse_command(cmd)
-        parsed["_raw"] = cmd.strip()
-        st.session_state["active_command"] = parsed
-        return parsed
-    return st.session_state["active_command"]
-
-
-def _command_summary(cmd, sidebar_state):
-    if not cmd:
-        return ""
-    bits = []
-    if cmd.get("regions"):
-        bits.append("scopes=" + ",".join(cmd["regions"]))
-    if cmd.get("min_importance"):
-        bits.append("importance>=" + cmd["min_importance"])
-    elif sidebar_state.get("levels"):
-        bits.append("levels=" + "/".join(sidebar_state["levels"]))
-    if cmd.get("themes"):
-        bits.append("themes=" + ",".join(cmd["themes"]))
-    if cmd.get("query"):
-        bits.append("query=" + repr(cmd["query"]))
-    if sidebar_state.get("time_window") and sidebar_state["time_window"] != "All":
-        bits.append("window=" + sidebar_state["time_window"])
-    return "  |  ".join(bits) if bits else "(no filters parsed)"
-
-
-def render_command_results(command_state, sidebar_state):
-    if not command_state:
-        return
-    relevant = {k: v for k, v in command_state.items()
-                if k in {"query", "regions", "min_importance", "themes"} and v}
-    if not relevant:
-        st.info("Command parsed but produced no filters. Try `CPI US` or `**** inflation EM`.")
-        return
-
-    st.divider()
-    raw = command_state.get("_raw", "")
-    st.subheader(f"Command results: `{raw}`")
-    st.caption(_command_summary(command_state, sidebar_state))
-
-    all_results = _load_many(ALL_NOTE_FILES)
-    all_releases = releases_from_load_results(all_results)
-
-    extra = {}
-    if "min_importance" not in relevant and sidebar_state.get("levels"):
-        extra["levels"] = sidebar_state["levels"]
-    extra["since"] = time_window_to_since(sidebar_state.get("time_window"))
-
-    filtered = filter_releases(all_releases, **relevant, **extra)
-    render_release_list(filtered, limit=100, empty_message="No releases match this command.")
-
-
 def tab_weekly_monitor(state):
     scope = state["scope"]
     view = state["view"]
@@ -364,7 +260,6 @@ def tab_weekly_monitor(state):
         # surface twice.
         releases = dedup_releases(releases)
         if min_importance:
-            from core.search import filter_releases
             releases = filter_releases(releases, min_importance=min_importance)
 
         if not releases:
@@ -484,9 +379,29 @@ def tab_macro_notes(state):
 
     if view_mode == "Latest note only":
         st.markdown(f"### {scope} - Macro Note")
+        meta_bits = []
         if latest_label:
-            st.caption(f"Data window: {latest_label}")
-        st.code(latest_block.raw_text, language="text", wrap_lines=True)
+            meta_bits.append(f"Data window: {latest_label}")
+        n_lines = len(latest_block.raw_text.splitlines())
+        n_chars = len(latest_block.raw_text)
+        meta_bits.append(f"{n_lines:,} lines  -  {n_chars:,} chars")
+        st.caption("  |  ".join(meta_bits))
+        # Download button: lets the user grab the full block as plain text,
+        # which is the most reliable proof that the parser captured every
+        # line. Place it right next to the metadata so it's obviously about
+        # the block currently rendered.
+        st.download_button(
+            "Download full note (.txt)",
+            data=latest_block.raw_text,
+            file_name=f"{scope}_{filename}".replace(".txt", "") + "_latest.txt",
+            mime="text/plain",
+            key="mn_latest_download",
+        )
+        # Bound the height so the user has a per-block scroll surface --
+        # otherwise a 700-line note pushes everything else off the page and
+        # it can look like the rendering is truncated.
+        with st.container(height=600, border=True):
+            st.code(latest_block.raw_text, language="text", wrap_lines=True)
         if previous:
             st.caption(
                 f"{len(previous)} earlier version(s) hidden. "
@@ -901,8 +816,6 @@ def _reset_state_for_scope(new_scope, session=None):
             del session[key]
         except KeyError:
             pass
-    # Active command state may carry stale region filters from a prior scope.
-    session["active_command"] = {}
     # Pre-seed the catalogue country so the new tab default reflects scope.
     new_country = default_catalogue_country(new_scope)
     if new_country:
@@ -948,11 +861,9 @@ def main():
     st.title("Macro FX Feed Dashboard")
     st.caption(
         "Structured macro terminal over the GitHub-hosted archive. "
-        "Sidebar scopes the view; the command bar runs QUICK-style shortcuts across all files."
+        "Sidebar scopes the view across all tabs."
     )
     st.caption(f"Current scope: `{state['scope']}`")
-    command_state = command_bar()
-    render_command_results(command_state, state)
 
     tab1, tab2, tab3 = st.tabs([
         "Weekly Monitor", "Macro Notes", "Country Release Catalogue",
