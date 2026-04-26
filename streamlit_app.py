@@ -35,9 +35,9 @@ from core.normalize import (
 from core.parsers import (
     block_data_window,
     extract_blocks,
-    extract_macro_note_blocks,
     extract_releases,
     releases_from_load_results,
+    split_top_level_sections,
 )
 from core.render import (
     importance_chip,
@@ -283,6 +283,92 @@ def tab_weekly_monitor(state):
             render_release_card(r, default_expanded=False)
 
 
+def tab_macro_synthesis(state):
+    """Read-only view of weekly file sections A (Macro Synthesis) and
+    B (Signal Scoreboard). Pulls from the scope's frozen-week file. The
+    actual release archive (section C) is intentionally NOT shown here --
+    that's covered by Weekly Monitor.
+    """
+    scope = state["scope"]
+    scope_file = SCOPE_FILES.get(scope, {}).get("frozen_week", "")
+    st.header(f"{scope} - Macro Synthesis")
+    if not scope_file:
+        st.info(f"No `Frozen week` file configured for `{scope}`.")
+        return
+
+    result = _load_file(scope_file)
+    if result.error:
+        st.warning(result.error)
+    if not result.text:
+        st.info(f"No content available for `{scope_file}`.")
+        return
+
+    blocks = extract_blocks(result.text, source_file=result.filename)
+    scope_blocks = [b for b in blocks if b.region == scope] or blocks
+    if not scope_blocks:
+        st.info(f"No `{scope}` weekly blocks parsed from `{scope_file}`.")
+        return
+
+    st.caption(
+        f"File: `{scope_file}`  |  Scope: `{scope}`  |  {source_badge(result)}"
+    )
+
+    # Sort weeks latest-first; default to the latest. Each weekly block
+    # has its own A/B/C sections.
+    entries = []
+    for b in scope_blocks:
+        label, start, end = block_data_window(b)
+        entries.append({"block": b, "label": label, "start": start, "end": end})
+    entries.sort(key=lambda e: e["start"] or _dt.date.min, reverse=True)
+
+    if len(entries) > 1:
+        labels = [e["label"] or f"{e['block'].stem} (no window)" for e in entries]
+        idx = st.selectbox(
+            "Week",
+            options=list(range(len(entries))),
+            format_func=lambda i: labels[i],
+            index=0,
+            key=f"ms_week_{scope}",
+            help="Default = latest week. Pick an older week to see its A+B.",
+        )
+    else:
+        idx = 0
+
+    selected = entries[idx]
+    block = selected["block"]
+    sections = split_top_level_sections(block.raw_text)
+    a_b = [s for s in sections if s[0] in ("A", "B")]
+
+    if not a_b:
+        st.info(
+            "No A/B synthesis sections found in this week's block. The "
+            "file may not yet contain the synthesis layer for this window."
+        )
+        return
+
+    if selected["label"]:
+        st.markdown(f"#### Data window: {selected['label']}")
+
+    # One-click export of A+B as plain text -- LLM-ready, mirrors the
+    # Catalogue export contract.
+    export_text = "\n\n".join(
+        f"{header}\n\n{body}".strip() for _letter, header, body in a_b
+    ).rstrip() + "\n"
+    end_label = (selected["end"].isoformat() if selected["end"]
+                 else (selected["start"].isoformat() if selected["start"] else "latest"))
+    st.download_button(
+        "Download A+B (.txt)",
+        data=export_text,
+        file_name=f"{scope}_synthesis_{end_label}.txt".replace(" ", "_"),
+        mime="text/plain",
+        key=f"ms_download_{scope}_{idx}",
+    )
+
+    for _letter, header, body in a_b:
+        st.markdown(f"### {header}")
+        st.code(body, language="text", wrap_lines=True)
+
+
 _MACRO_NOTE_VIEWS = ["Latest note only", "Previous notes", "All notes archive"]
 
 
@@ -356,12 +442,7 @@ def tab_macro_notes(state):
         st.info(f"No content available for `{filename}`.")
         return
 
-    # Macro notes: each <<STEM_BEGIN>>...<<STEM_END>> pair is ONE complete
-    # note version. Inner "Data window:" lines (e.g. a table of historical
-    # windows in the body) are metadata, NOT body-split points. The
-    # extractor uses the LATEST Data window: line as the block's primary
-    # window for chronological sorting.
-    blocks = extract_macro_note_blocks(result.text, source_file=result.filename)
+    blocks = extract_blocks(result.text, source_file=result.filename)
     versions = _macro_note_versions(blocks)
     if not versions:
         st.info(f"No note versions parsed from `{filename}`.")
@@ -382,29 +463,9 @@ def tab_macro_notes(state):
 
     if view_mode == "Latest note only":
         st.markdown(f"### {scope} - Macro Note")
-        meta_bits = []
         if latest_label:
-            meta_bits.append(f"Data window: {latest_label}")
-        n_lines = len(latest_block.raw_text.splitlines())
-        n_chars = len(latest_block.raw_text)
-        meta_bits.append(f"{n_lines:,} lines  -  {n_chars:,} chars")
-        st.caption("  |  ".join(meta_bits))
-        # Download button: lets the user grab the full block as plain text,
-        # which is the most reliable proof that the parser captured every
-        # line. Place it right next to the metadata so it's obviously about
-        # the block currently rendered.
-        st.download_button(
-            "Download full note (.txt)",
-            data=latest_block.raw_text,
-            file_name=f"{scope}_{filename}".replace(".txt", "") + "_latest.txt",
-            mime="text/plain",
-            key="mn_latest_download",
-        )
-        # Bound the height so the user has a per-block scroll surface --
-        # otherwise a 700-line note pushes everything else off the page and
-        # it can look like the rendering is truncated.
-        with st.container(height=600, border=True):
-            st.code(latest_block.raw_text, language="text", wrap_lines=True)
+            st.caption(f"Data window: {latest_label}")
+        st.code(latest_block.raw_text, language="text", wrap_lines=True)
         if previous:
             st.caption(
                 f"{len(previous)} earlier version(s) hidden. "
@@ -793,7 +854,7 @@ def tab_country_release_catalogue():
 # each tab re-derives its defaults from the new scope.
 
 # Tab-local widget keys to drop on scope change. The sidebar keys
-# (sb_group, sb_scope, sb_view, sb_levels, sb_themes, sb_time_window) and
+# (sb_group, sb_scope, sb_view, sb_levels, sb_time_window) and
 # the refresh token are deliberately NOT listed here.
 _SCOPE_RESET_KEYS = (
     # Macro Notes
@@ -819,7 +880,6 @@ def _reset_state_for_scope(new_scope, session=None):
             del session[key]
         except KeyError:
             pass
-    # Pre-seed the catalogue country so the new tab default reflects scope.
     new_country = default_catalogue_country(new_scope)
     if new_country:
         session["cc_country"] = new_country
@@ -830,18 +890,15 @@ def _reset_state_for_scope(new_scope, session=None):
 def _handle_scope_change(scope):
     """If sidebar scope changed since the last render, reset tab state and rerun.
 
-    First render: just records the scope, no reset (so users keep any
-    selections they made before the very first widget refresh). Subsequent
-    renders: on real change, reset and rerun so widgets pick up new defaults.
-    Returns True when a reset happened.
+    First render: just records the scope, no reset. Subsequent renders: on
+    real change, reset and rerun so widgets pick up new defaults. Returns
+    True when a reset happened.
     """
     prev = st.session_state.get("_prev_scope")
     if prev is None:
-        # First render: don't reset tab state (user may have just typed a
-        # query or selected a row), but DO seed the catalogue country so
+        # First render: don't reset tab state, but DO seed cc_country so
         # the Catalogue tab opens on the sidebar scope's representative
-        # country (USD -> US, EUR -> Eurozone, GBP -> UK ...) rather than
-        # falling back to the alphabetical-first option.
+        # country (USD -> US, EUR -> Eurozone, GBP -> UK ...).
         if "cc_country" not in st.session_state:
             seeded = default_catalogue_country(scope)
             if seeded:
@@ -868,14 +925,19 @@ def main():
     )
     st.caption(f"Current scope: `{state['scope']}`")
 
-    tab1, tab2, tab3 = st.tabs([
-        "Weekly Monitor", "Macro Notes", "Country Release Catalogue",
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Weekly Monitor",
+        "Macro Synthesis",
+        "Macro Notes",
+        "Country Release Catalogue",
     ])
     with tab1:
         tab_weekly_monitor(state)
     with tab2:
-        tab_macro_notes(state)
+        tab_macro_synthesis(state)
     with tab3:
+        tab_macro_notes(state)
+    with tab4:
         tab_country_release_catalogue()
 
 
