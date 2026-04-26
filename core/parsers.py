@@ -98,7 +98,13 @@ def _stem_to_kind(stem: str) -> str:
 def _marker_regex(stem):
     begin = re.escape(MARKER_PREFIX + stem + "_BEGIN" + MARKER_SUFFIX)
     end = re.escape(MARKER_PREFIX + stem + "_END" + MARKER_SUFFIX)
-    return re.compile(begin + r"\s*(.*?)\s*" + end, re.DOTALL)
+    # Greedy `.*` so the block extends to the LAST `<<STEM_END>>` in the
+    # file. Some macro-note files use an inner `<<STEM_END>>` as a
+    # section divider after the brief summary, then a final
+    # `<<<STEM_END>>>` (triple bracket) as the actual terminator. A lazy
+    # match would stop at the first inner END and silently drop the
+    # detailed sections that follow.
+    return re.compile(begin + r"\s*(.*)\s*" + end, re.DOTALL)
 
 
 def extract_blocks(text: str, source_file: str, *, split_weekly=True):
@@ -697,6 +703,43 @@ def block_data_window(block):
     e = max(dates)
     label = f"{s.strftime('%d %b %Y')} to {e.strftime('%d %b %Y')}"
     return (label, s, e)
+
+
+def extract_macro_note_blocks(text, source_file):
+    """Macro-note-specific extractor.
+
+    Two differences from `extract_blocks(text, source_file)`:
+      - `split_weekly=False`: the marker block stays whole even when the
+        body contains multiple `Data window:` lines (e.g. a table of
+        historical windows that should NOT be treated as version
+        separators). Each `<<STEM_BEGIN>>...<<STEM_END>>` pair is one
+        complete note version.
+      - The block's `data_window` metadata is populated from the LATEST
+        `Data window:` line found inside the body. This is for
+        sorting/display only -- the body is preserved verbatim.
+    """
+    blocks = extract_blocks(text, source_file=source_file, split_weekly=False)
+    out = []
+    for b in blocks:
+        windows = find_data_windows(b.raw_text)
+        if not windows:
+            out.append(b)
+            continue
+        latest = None
+        latest_end = None
+        for label, start, end, _ms, _me in windows:
+            end_d = parse_release_date(end) if end else None
+            if end_d is None:
+                continue
+            if latest_end is None or end_d > latest_end:
+                latest_end = end_d
+                latest = (label, start, end)
+        if latest is None:
+            label, start, end, _ms, _me = windows[-1]
+            latest = (label, start, end)
+        b.data_window, b.data_window_start, b.data_window_end = latest
+        out.append(b)
+    return out
 
 
 def blocks_from_load_results(results):
