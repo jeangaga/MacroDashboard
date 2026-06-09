@@ -35,6 +35,8 @@ from core.normalize import (
 from core.parsers import (
     block_data_window,
     extract_blocks,
+    extract_central_bank_tape_text,
+    extract_macro_note_versions,
     extract_releases,
     releases_from_load_results,
     split_top_level_sections,
@@ -42,6 +44,7 @@ from core.parsers import (
 from core.render import (
     importance_chip,
     render_block,
+    render_central_bank_tape,
     render_load_status,
     render_release_card,
     render_release_list,
@@ -263,7 +266,16 @@ def tab_weekly_monitor(state):
         if min_importance:
             releases = filter_releases(releases, min_importance=min_importance)
 
-        if not releases:
+        # The CENTRAL BANK TAPE section is grouped into a single card shown
+        # AFTER the data releases, rather than as peer cards interleaved by
+        # date. Split it out here.
+        cb_releases = [r for r in releases
+                       if getattr(r, "section", "data") == "central_bank_tape"]
+        data_releases = [r for r in releases
+                         if getattr(r, "section", "data") != "central_bank_tape"]
+        tape_text = extract_central_bank_tape_text(b)
+
+        if not data_releases and not (cb_releases or tape_text):
             st.info("No releases at the selected importance in this week.")
             continue
 
@@ -274,13 +286,17 @@ def tab_weekly_monitor(state):
             d = parse_release_date(r.date_str) or _dt.date.min
             return (d, idx)
 
-        indexed = list(enumerate(releases))
+        indexed = list(enumerate(data_releases))
         indexed.sort(key=_sort_key, reverse=sort_desc)
         sorted_releases = [r for _, r in indexed]
 
         st.caption(f"{len(sorted_releases)} release(s) in this window")
         for r in sorted_releases:
             render_release_card(r, default_expanded=False)
+
+        # Central Bank Tape last, as one grouped card.
+        if cb_releases or tape_text:
+            render_central_bank_tape(tape_text, cb_releases)
 
 
 def tab_macro_synthesis(state):
@@ -394,6 +410,37 @@ def _macro_note_versions(blocks):
     return annotated
 
 
+def _seed_macro_note_picker(session_state, sidebar_scope, note_options):
+    """Keep the Macro Notes file picker following the sidebar scope.
+
+    Streamlit ignores a selectbox's `index=` argument once that keyed widget
+    already has a value in session_state, so on reruns the picker would stay
+    stuck on whatever file it first showed even after the user changes the
+    sidebar scope. This re-seeds `mn_select` to the scope's own macro note
+    whenever the sidebar scope changes to a scope that HAS one.
+
+    Behavior:
+      - First render, or scope changed to one with its own note -> seed to it.
+      - Scope changed to one with NO note (e.g. CAD) -> leave the current pick.
+      - Same scope across reruns -> leave the user's manual pick untouched.
+
+    Mutates `session_state` in place; returns the resolved default index.
+    """
+    matched_idx = None
+    for i, (s, _) in enumerate(note_options):
+        if s == sidebar_scope:
+            matched_idx = i
+            break
+    default_idx = matched_idx if matched_idx is not None else 0
+    if session_state.get("mn_last_scope") != sidebar_scope:
+        session_state["mn_last_scope"] = sidebar_scope
+        if matched_idx is not None:
+            session_state["mn_select"] = matched_idx
+    if "mn_select" not in session_state:
+        session_state["mn_select"] = default_idx
+    return default_idx
+
+
 def tab_macro_notes(state):
     st.header("Macro Notes")
     note_options = [
@@ -406,20 +453,17 @@ def tab_macro_notes(state):
         return
 
     # Scope-aware default: pre-select the macro note tied to the sidebar
-    # scope (e.g. sidebar=USD -> USD_MACRO_NOTE.txt).
+    # scope (e.g. sidebar=USD -> USD_MACRO_NOTE.txt). Streamlit ignores the
+    # `index=` arg once a keyed widget's value lives in session_state, so this
+    # helper re-seeds `mn_select` whenever the sidebar scope changes.
     sidebar_scope = (state or {}).get("scope", "")
-    default_idx = 0
-    for i, (s, _) in enumerate(note_options):
-        if s == sidebar_scope:
-            default_idx = i
-            break
+    _seed_macro_note_picker(st.session_state, sidebar_scope, note_options)
 
     cols = st.columns([3, 2])
     labels = [f"{s}  -  {fn}" for s, fn in note_options]
     idx = cols[0].selectbox(
         "Macro note file",
         options=list(range(len(note_options))),
-        index=default_idx,
         format_func=lambda i: labels[i],
         key="mn_select",
         help="Default tracks the sidebar scope. Pick another to view it.",
@@ -442,7 +486,7 @@ def tab_macro_notes(state):
         st.info(f"No content available for `{filename}`.")
         return
 
-    blocks = extract_blocks(result.text, source_file=result.filename)
+    blocks = extract_macro_note_versions(result.text, source_file=result.filename)
     versions = _macro_note_versions(blocks)
     if not versions:
         st.info(f"No note versions parsed from `{filename}`.")
