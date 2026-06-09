@@ -87,6 +87,26 @@ def render_release_card(release, *, default_expanded=False):
         st.code(release.raw_block, language="text", wrap_lines=True)
 
 
+def render_central_bank_tape(tape_text, releases=None, *, default_expanded=False):
+    """Render the CENTRAL BANK TAPE section as ONE collapsible card so the
+    speaker tape sits below the data releases instead of as peer cards.
+
+    `tape_text` is the raw section body (summary + speeches); `releases` are
+    the individual speaker items parsed from the section, used for the count
+    and speaker line.
+    """
+    releases = list(releases or [])
+    n = len(releases)
+    suffix = f"  -  {n} speaker item(s)" if n else ""
+    with st.expander(f"Central Bank Tape{suffix}", expanded=default_expanded):
+        if releases:
+            speakers = [r.title for r in releases if r.title]
+            if speakers:
+                st.caption("Speakers: " + ", ".join(speakers))
+        st.code(tape_text or "(no central bank tape content)",
+                language="text", wrap_lines=True)
+
+
 def render_release_list(releases, *, empty_message="No matching releases.", limit=None):
     releases = list(releases)
     if not releases:

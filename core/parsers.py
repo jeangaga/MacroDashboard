@@ -160,6 +160,12 @@ class Release:
     # catalogue grouping anchor so a delayed revision can't outrank a fresh
     # print for an earlier reference period.
     reference_period: Optional[str] = None
+    # Top-level weekly-note section this release was parsed from
+    # ("data" for the normal release stream, "central_bank_tape" for ECB/Fed
+    # speaker-tape items, "synthesis"/"signal_tension"/"key_releases"/
+    # "red_team" for the named narrative sections). The Weekly Monitor groups
+    # "central_bank_tape" releases into a single card instead of peer cards.
+    section: str = "data"
 
     @property
     def importance_rank(self) -> int:
@@ -370,6 +376,100 @@ def _is_synthesis_header_line(line):
     return bool(_SYNTHESIS_HEADER_RE.match((line or "").strip()))
 
 
+# Top-level section headers in the evolved weekly format. A note is laid out:
+#   A. <SCOPE> WEEK - MACRO SYNTHESIS
+#   B. <SCOPE> MACRO SIGNAL SCOREBOARD
+#   CENTRAL BANK TAPE              (optional; absent in some versions / DM-EM)
+#   SIGNAL TENSION CHECK
+#   N KEY RELEASES TO DIG INTO     (N = 3 or 5 depending on version)
+#   RED TEAM QUESTIONS FOR JGM / SECOND PASS SCOUT   (optional)
+# These standalone ALL-CAPS headers delimit sections: a release's commentary
+# must never run past one of them (that bug let a data release swallow the
+# CENTRAL BANK TAPE summary), and CENTRAL BANK TAPE content is grouped rather
+# than shown as peer release cards.
+_WEEKLY_SECTION_NAME_RES = [
+    ("central_bank_tape", re.compile(r"^CENTRAL\s+BANK\s+TAPE\b")),
+    ("signal_tension",    re.compile(r"^SIGNAL\s+TENSION\s+CHECK\b")),
+    ("key_releases",      re.compile(r"^\d+\s+KEY\s+RELEASES\s+TO\s+DIG\s+INTO\b")),
+    ("red_team",          re.compile(r"^(?:RED\s+TEAM\s+QUESTIONS|SECOND\s+PASS\s+SCOUT)\b")),
+]
+
+
+def _is_upper_header(s):
+    """True for a short, standalone, ALL-CAPS header line (digits/punctuation
+    allowed, but no lowercase letters). This distinguishes a top-level section
+    header ("SIGNAL TENSION CHECK") from a per-release title-cased commentary
+    label ("Signal Tension Check: ...") that older notes attach to a release.
+    """
+    s = (s or "").strip()
+    if not s or len(s) > 70:
+        return False
+    if any(ch.islower() for ch in s):
+        return False
+    return any(ch.isalpha() for ch in s)
+
+
+def weekly_section_of(line):
+    """Return the section id for a top-level weekly section header line, else
+    None. Synthesis dividers (A./B./C. ... SYNTHESIS/SCOREBOARD/ARCHIVE) map to
+    'synthesis'. Named sections must be ALL-CAPS to count as a boundary.
+    """
+    s = (line or "").strip()
+    if not s:
+        return None
+    if _is_synthesis_header_line(s):
+        return "synthesis"
+    if not _is_upper_header(s):
+        return None
+    for sid, pat in _WEEKLY_SECTION_NAME_RES:
+        if pat.match(s):
+            return sid
+    return None
+
+
+def _isolate_section_headers(text):
+    """Ensure every top-level weekly section header sits on its own paragraph
+    by surrounding it with blank lines. Lets the paragraph splitter see the
+    header as a distinct boundary even in dense, blank-line-poor blocks."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    out = []
+    for line in lines:
+        if weekly_section_of(line):
+            if out and out[-1].strip():
+                out.append("")
+            out.append(line)
+            out.append("")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def extract_central_bank_tape_text(block):
+    """Return the raw text of the CENTRAL BANK TAPE section of a weekly block
+    (everything after its header up to the next top-level section header), or
+    "" when the block has no CENTRAL BANK TAPE section.
+    """
+    if not block or not block.raw_text:
+        return ""
+    lines = block.raw_text.split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if weekly_section_of(line) == "central_bank_tape":
+            start = i
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        sec = weekly_section_of(lines[j])
+        if sec is not None and sec != "central_bank_tape":
+            end = j
+            break
+    return "\n".join(lines[start + 1:end]).strip()
+
+
 def _looks_like_commentary_fragment(line):
     """True when the line looks like prose / commentary, not a release title."""
     s = (line or "").strip()
@@ -517,21 +617,40 @@ def extract_releases(block):
     """
     if not block or not block.raw_text:
         return []
-    # Some weekly archives pack multiple releases per block with no blank
-    # lines between them (the new MACRO SYNTHESIS / SCOREBOARD / FULL
-    # RELEASE ARCHIVE format). Inject blank lines before each release
-    # boundary so the paragraph splitter sees them as distinct paragraphs.
+    # First inject blank lines before dense release boundaries (so blocks
+    # packing multiple releases per paragraph split correctly), THEN isolate
+    # top-level section headers (CENTRAL BANK TAPE, SIGNAL TENSION CHECK, ...)
+    # onto their own paragraphs so they act as hard release boundaries: a
+    # release's commentary must never run into the next section. Order
+    # matters -- isolating first would inflate the blank-line count that the
+    # injection heuristic uses to detect dense blocks, disabling it.
     raw_text = _inject_release_boundaries(block.raw_text)
+    raw_text = _isolate_section_headers(raw_text)
     paragraphs = _PARAGRAPH_SPLIT.split(raw_text)
 
-    groups = []
+    groups = []            # list of (group_paragraphs, section_id)
     current = None
+    current_section = "data"   # section the currently-open group belongs to
+    active_section = "data"    # section being scanned right now
     pending_preamble = None
 
     for para in paragraphs:
         para = para.strip("\n")
         if not para.strip():
             continue
+        # A standalone top-level section header closes any open release
+        # (commentary never bleeds across sections) and switches the active
+        # section. The header itself is not part of any release.
+        meaningful = [ln for ln in para.splitlines() if ln.strip()]
+        if len(meaningful) == 1:
+            sec = weekly_section_of(meaningful[0])
+            if sec is not None:
+                if current is not None:
+                    groups.append((current, current_section))
+                    current = None
+                pending_preamble = None
+                active_section = sec
+                continue
         # Drop pure day-header paragraphs entirely.
         if _is_day_header_paragraph(para):
             continue
@@ -553,13 +672,14 @@ def extract_releases(block):
             ):
                 promoted = current.pop()
             if current is not None:
-                groups.append(current)
+                groups.append((current, current_section))
             if promoted is not None:
                 current = [promoted, para]
             elif pending_preamble is not None:
                 current = [pending_preamble, para]
             else:
                 current = [para]
+            current_section = active_section
             pending_preamble = None
         else:
             if current is None:
@@ -571,12 +691,12 @@ def extract_releases(block):
             current.append(para)
 
     if current is not None:
-        groups.append(current)
+        groups.append((current, current_section))
 
     releases = []
     region = block.region
     kind = block.kind
-    for group in groups:
+    for group, group_section in groups:
         first = group[0]
         first_flag = max_importance(first)
         if first_flag is None:
@@ -636,6 +756,7 @@ def extract_releases(block):
             themes=themes,
             raw_block=collapse_blank_lines(full_text),
             reference_period=reference_period,
+            section=group_section,
         ))
     return releases
 
@@ -768,11 +889,16 @@ def extract_macro_note_blocks(text, source_file):
         sorting/display only -- the body is preserved verbatim.
     """
     blocks = extract_blocks(text, source_file=source_file, split_weekly=False)
-    out = []
+    return _annotate_latest_window(blocks)
+
+
+def _annotate_latest_window(blocks):
+    """Populate each block's primary `data_window` from the LATEST
+    `Data window:` line found in its body. Blocks with no window are left
+    unchanged. The body is never modified. Returns the same list."""
     for b in blocks:
         windows = find_data_windows(b.raw_text)
         if not windows:
-            out.append(b)
             continue
         latest = None
         latest_end = None
@@ -787,8 +913,78 @@ def extract_macro_note_blocks(text, source_file):
             label, start, end, _ms, _me = windows[-1]
             latest = (label, start, end)
         b.data_window, b.data_window_start, b.data_window_end = latest
-        out.append(b)
-    return out
+    return blocks
+
+
+# END marker tolerant of 2+ brackets on each side: `<<STEM_END>>` (inner
+# divider) and `<<<STEM_END>>>` (real terminator) both match.
+def _macro_end_regex(stem):
+    return re.compile(r"<{2,}\s*" + re.escape(stem + "_END") + r"\s*>{2,}")
+
+
+def _macro_begin_regex(stem):
+    return re.compile(re.escape(MARKER_PREFIX + stem + "_BEGIN" + MARKER_SUFFIX))
+
+
+def extract_macro_note_versions(text, source_file):
+    """Split a macro-note file into one Block per note VERSION.
+
+    A version starts at each `<<STEM_BEGIN>>` marker and runs to the next
+    `<<STEM_BEGIN>>` (or end of file). This is the correct unit for the
+    Macro Notes tab: unlike `extract_blocks(split_weekly=True)` it does NOT
+    fragment a version at internal `Data window:` lines, and unlike the
+    greedy single-block parse it does NOT merge consecutive versions into
+    one block (which previously made "Latest note only" bleed the next
+    version's `<<END>>`/`<<BEGIN>>` markers and body into the view).
+
+    Within a version an inner `<<STEM_END>>` (double bracket) may act as a
+    brief/detail divider; the final END marker (double or triple bracket)
+    before the next BEGIN terminates the body. All END marker lines are
+    stripped from the displayed body, but the surrounding content -- and any
+    `Data window:` table -- is preserved verbatim. Each block's primary
+    window metadata is the latest `Data window:` line in its body.
+    """
+    if not text:
+        return []
+    # Pick the stem whose BEGIN marker actually appears in the file; fall
+    # back to the filename-derived stem.
+    stem = None
+    for cand in _all_known_stems():
+        if (MARKER_PREFIX + cand + "_BEGIN" + MARKER_SUFFIX) in text:
+            stem = cand
+            break
+    if stem is None:
+        stem = _stem_from_filename(source_file)
+
+    begin_re = _macro_begin_regex(stem)
+    end_re = _macro_end_regex(stem)
+    begins = [m.start() for m in begin_re.finditer(text)]
+
+    if not begins:
+        body = text.strip()
+        if not body:
+            return []
+        return _annotate_latest_window(
+            [Block(stem=stem, source_file=source_file, raw_text=body)]
+        )
+
+    out = []
+    for i, bpos in enumerate(begins):
+        seg_end = begins[i + 1] if i + 1 < len(begins) else len(text)
+        segment = text[bpos:seg_end]
+        # Drop the leading BEGIN marker.
+        segment = begin_re.sub("", segment, count=1)
+        # Cut at the LAST END marker in the segment, dropping the terminator
+        # and any trailing junk before the next version.
+        ends = list(end_re.finditer(segment))
+        if ends:
+            segment = segment[: ends[-1].start()]
+        # Remove any remaining inner END marker lines, keep their content.
+        body = end_re.sub("", segment).strip()
+        if not body:
+            continue
+        out.append(Block(stem=stem, source_file=source_file, raw_text=body))
+    return _annotate_latest_window(out)
 
 
 def blocks_from_load_results(results):
