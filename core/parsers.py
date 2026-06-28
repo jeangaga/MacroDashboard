@@ -661,8 +661,19 @@ def extract_releases(block):
             if not stripped.strip():
                 continue
             para = stripped
+        # A paragraph only STARTS a new release if it carries a real release
+        # signal (a "Release Date:" / "Importance:" field line, or a
+        # country-dashed title). A bare asterisk is NOT enough: commentary
+        # bullet lists ("Signal hierarchy:\n* Tokyo core CPI: downside surprise
+        # \n* ...") begin with "*", which max_importance reads as a "*"
+        # importance flag. Without this guard those bullets split the release,
+        # truncating it (the block was being cut off at "Signal hierarchy:" and
+        # everything after -- bullets, State transition, HF Take -- was dropped
+        # as a signal-less group). Every genuine importance marker
+        # ("Importance: ****" line or a "*** Country - Title" header) also
+        # satisfies _has_release_signals, so real releases are unaffected.
         flag = max_importance(para)
-        if flag is not None:
+        if flag is not None and _has_release_signals(para):
             promoted = None
             if (
                 current is not None
