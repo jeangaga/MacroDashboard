@@ -269,10 +269,23 @@ def tab_weekly_monitor(state):
         # The CENTRAL BANK TAPE section is grouped into a single card shown
         # AFTER the data releases, rather than as peer cards interleaved by
         # date. Split it out here.
+        #
+        # The narrative sections (SIGNAL TENSION CHECK, "N KEY RELEASES TO DIG
+        # INTO", RED TEAM QUESTIONS) only *reference* releases -- they are
+        # commentary, not the release archive. Their importance-flagged,
+        # country-dashed lines (e.g. "**** Japan - CGPI (10 Jun)") otherwise
+        # get parsed as phantom peer release cards that duplicate the real
+        # archive entries. Keep them out of the displayed data stream.
+        # NOTE: "synthesis" is intentionally NOT excluded -- "C. FULL RELEASE
+        # ARCHIVE" maps to that section id, so it carries the *real* releases.
+        _NARRATIVE_SECTIONS = {
+            "signal_tension", "key_releases", "red_team",
+        }
         cb_releases = [r for r in releases
                        if getattr(r, "section", "data") == "central_bank_tape"]
         data_releases = [r for r in releases
-                         if getattr(r, "section", "data") != "central_bank_tape"]
+                         if getattr(r, "section", "data") != "central_bank_tape"
+                         and getattr(r, "section", "data") not in _NARRATIVE_SECTIONS]
         tape_text = extract_central_bank_tape_text(b)
 
         if not data_releases and not (cb_releases or tape_text):
