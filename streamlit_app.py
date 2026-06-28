@@ -48,6 +48,7 @@ from core.render import (
     render_load_status,
     render_release_card,
     render_release_list,
+    render_week_summary,
     source_badge,
 )
 from core.search import filter_releases
@@ -257,6 +258,11 @@ def tab_weekly_monitor(state):
             st.markdown(f"### Data window: {label}")
         else:
             st.markdown(f"### {b.stem} (no data window declared)")
+
+        # Per-week narrative summary (Synthesis / Scoreboard / Signal Tension /
+        # Key Releases / Red Team), collapsed by default with the scoreboard
+        # glyphs in the row. Sits between the data-window header and the cards.
+        render_week_summary(b)
 
         releases = extract_releases(b)
         # Dedup by stable key (country|normalized|date|importance) so the
