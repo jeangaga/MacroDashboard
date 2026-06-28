@@ -886,6 +886,78 @@ def split_top_level_sections(block_raw_text):
     return sections
 
 
+# A scoreboard signal line in section B, e.g. "Growth: -", "Labor: +",
+# "Inflation: ~". The note already encodes the direction as a +/-/~ glyph, so
+# no mapping is needed -- we surface the glyph verbatim.
+_SCOREBOARD_SIGNAL_RE = re.compile(
+    r"^\s*(Growth|Labou?r|Inflation)\s*:\s*([-+~])\s*$", re.I
+)
+
+
+def extract_week_summary(block):
+    """Extract the narrative summary of a weekly block for the Weekly Monitor
+    summary expander.
+
+    Returns a dict:
+        {
+          "signals":  [(name, glyph), ...]   # Growth / Labor / Inflation, in
+                                              # that order, read from section B.
+          "sections": [(header_line, body), ...]   # A (Macro Synthesis),
+                                              # B (Signal Scoreboard), SIGNAL
+                                              # TENSION CHECK, N KEY RELEASES TO
+                                              # DIG INTO and RED TEAM / SECOND
+                                              # PASS (if present), in document
+                                              # order. Excludes the release
+                                              # archive (C/D) and CENTRAL BANK
+                                              # TAPE, which are rendered as
+                                              # their own cards.
+        }
+    """
+    empty = {"signals": [], "sections": []}
+    if not block or not block.raw_text:
+        return empty
+    lines = block.raw_text.splitlines()
+
+    # Locate every top-level header: letter sections (A-D) and the named
+    # narrative sections. Letter prefix wins, so "C. FULL RELEASE ARCHIVE"
+    # is tagged "letter:C" rather than the "synthesis" id weekly_section_of
+    # would give it.
+    headers = []  # (line_index, kind, header_text)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        m = _TOP_SECTION_RE.match(s)
+        if m:
+            headers.append((i, "letter:" + m.group(1).upper(), s))
+            continue
+        sec = weekly_section_of(line)
+        if sec in ("central_bank_tape", "signal_tension", "key_releases", "red_team"):
+            headers.append((i, sec, s))
+
+    # Slice each header's body up to the next header.
+    spans = []
+    for k, (idx, kind, hdr) in enumerate(headers):
+        end = headers[k + 1][0] if k + 1 < len(headers) else len(lines)
+        body = "\n".join(lines[idx + 1:end]).strip()
+        spans.append((kind, hdr, body))
+
+    # Scoreboard glyphs from section B (first occurrence of each signal wins).
+    b_body = next((body for kind, _h, body in spans if kind == "letter:B"), "")
+    found = {}
+    for bl in b_body.splitlines():
+        sm = _SCOREBOARD_SIGNAL_RE.match(bl)
+        if sm:
+            name = "Labor" if sm.group(1).lower().startswith("labo") else sm.group(1).title()
+            found.setdefault(name, sm.group(2))
+    signals = [(n, found[n]) for n in ("Growth", "Labor", "Inflation") if n in found]
+
+    # Narrative sections to surface, in document order.
+    wanted = {"letter:A", "letter:B", "signal_tension", "key_releases", "red_team"}
+    sections = [(hdr, body) for kind, hdr, body in spans if kind in wanted]
+    return {"signals": signals, "sections": sections}
+
+
 def extract_macro_note_blocks(text, source_file):
     """Macro-note-specific extractor.
 

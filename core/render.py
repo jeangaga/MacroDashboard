@@ -107,6 +107,32 @@ def render_central_bank_tape(tape_text, releases=None, *, default_expanded=False
                 language="text", wrap_lines=True)
 
 
+def render_week_summary(block, *, default_expanded=False):
+    """Render the per-week narrative summary as ONE collapsible expander that
+    sits between the "Data window" header and the release cards.
+
+    Collapsed, the row shows only the scoreboard glyphs
+    ("Growth: -   Labor: -   Inflation: ~"). Expanded, it shows the Macro
+    Synthesis (A), Signal Scoreboard (B), Signal Tension Check, Key Releases
+    and Red Team / Second Pass sections in document order.
+    """
+    from core.parsers import extract_week_summary
+
+    summary = extract_week_summary(block)
+    sections = summary.get("sections") or []
+    if not sections:
+        return
+    signals = summary.get("signals") or []
+    label = ("   ".join(f"{name}: {glyph}" for name, glyph in signals)
+             if signals else "Week summary")
+    body = "\n\n".join(
+        (f"{header}\n\n{sec_body}".rstrip() if sec_body else header)
+        for header, sec_body in sections
+    )
+    with st.expander(label, expanded=default_expanded):
+        st.code(body, language="text", wrap_lines=True)
+
+
 def render_release_list(releases, *, empty_message="No matching releases.", limit=None):
     releases = list(releases)
     if not releases:
