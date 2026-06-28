@@ -958,6 +958,72 @@ def extract_week_summary(block):
     return {"signals": signals, "sections": sections}
 
 
+# A full section-B scoreboard signal line, e.g. "Growth: ~", "Labor: -",
+# "Financial Conditions: ~", "Policy Constraint: +". The glyph (+/-/~) encodes
+# direction; "?" is tolerated for an unscored signal.
+_SCOREBOARD_DETAIL_RE = re.compile(
+    r"^\s*(Growth|Labou?r|Inflation|Financial\s+Conditions|Policy\s+Constraint)"
+    r"\s*:\s*([-+~?])\s*$",
+    re.I,
+)
+
+
+def _canonical_signal_name(raw):
+    low = (raw or "").strip().lower()
+    if low.startswith("labo"):
+        return "Labor"
+    if low.startswith("financial"):
+        return "Financial Conditions"
+    if low.startswith("policy"):
+        return "Policy Constraint"
+    if low.startswith("growth"):
+        return "Growth"
+    if low.startswith("inflation"):
+        return "Inflation"
+    return (raw or "").strip()
+
+
+def extract_macro_synthesis(block):
+    """Pull section A (Macro Synthesis prose) and the per-signal detail of
+    section B (Signal Scoreboard) out of one weekly block, for the cross-week
+    Macro Synthesis view.
+
+    Returns:
+        {
+          "synthesis_header": "A. <SCOPE> WEEK — MACRO SYNTHESIS" or "",
+          "synthesis":        "<section A prose>" or "",
+          "signals":          [(name, glyph, evidence_body), ...]  # section B,
+                              # in document order. `name` is canonicalised
+                              # (Growth / Labor / Inflation / Financial
+                              # Conditions / Policy Constraint); `evidence_body`
+                              # is everything under the signal line (the
+                              # "Supporting evidence:" label + paragraph) up to
+                              # the next signal line.
+        }
+    """
+    result = {"synthesis_header": "", "synthesis": "", "signals": []}
+    if not block or not block.raw_text:
+        return result
+    b_body = ""
+    for letter, header, body in split_top_level_sections(block.raw_text):
+        if letter == "A":
+            result["synthesis_header"] = header
+            result["synthesis"] = body
+        elif letter == "B":
+            b_body = body
+    signals = []
+    for line in b_body.splitlines():
+        m = _SCOREBOARD_DETAIL_RE.match(line)
+        if m:
+            signals.append([_canonical_signal_name(m.group(1)), m.group(2), []])
+        elif signals:
+            signals[-1][2].append(line)
+    result["signals"] = [
+        (name, glyph, "\n".join(lines).strip()) for name, glyph, lines in signals
+    ]
+    return result
+
+
 def extract_macro_note_blocks(text, source_file):
     """Macro-note-specific extractor.
 
