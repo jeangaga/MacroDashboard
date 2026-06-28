@@ -76,30 +76,28 @@ import streamlit_app  # noqa: E402
 reset_keys = streamlit_app._SCOPE_RESET_KEYS
 expect("_SCOPE_RESET_KEYS is a tuple of strings",
        isinstance(reset_keys, tuple) and all(isinstance(k, str) for k in reset_keys))
-# Sanity: cover every tab.
+# Sanity: cover every tab. (Release Search and Theme Monitor were removed
+# in the simplification pass, so their widget keys are no longer expected.)
 for required in ("mn_select", "mn_view_mode",
-                 "rs_query", "rs_scopes", "rs_themes", "rs_levels",
-                 "rs_window", "rs_rtypes", "rs_countries", "rs_view_mode",
-                 "tm_theme", "tm_window", "tm_levels", "tm_scopes", "tm_countries",
                  "cc_country", "cc_themes", "cc_search",
                  "cc_include_live", "cc_only_known", "cc_table"):
     expect(f"reset list contains {required}", required in reset_keys)
-# Must NOT leak into sidebar / global keys.
+# Must NOT leak into sidebar / global keys. (sb_themes was also removed.)
 for forbidden in ("sb_group", "sb_scope", "sb_view", "sb_levels",
-                  "sb_themes", "sb_time_window", "refresh_token"):
+                  "sb_time_window", "refresh_token"):
     expect(f"reset list excludes {forbidden}", forbidden not in reset_keys)
+# Removed tabs: their old widget keys must not be in the reset list.
+for removed in ("rs_query", "rs_scopes", "rs_themes", "rs_levels",
+                "rs_window", "rs_rtypes", "rs_countries", "rs_view_mode",
+                "tm_theme", "tm_window", "tm_levels", "tm_scopes", "tm_countries"):
+    expect(f"reset list excludes removed-tab key {removed}",
+           removed not in reset_keys)
 
 # Build a fake session populated with the kinds of keys the app produces.
 fake_session = {
     # tab-local state the user fiddled with under USD
     "mn_select": 0,
     "mn_view_mode": "All notes archive",
-    "rs_query": "CPI",
-    "rs_scopes": ["USD"],
-    "rs_levels": ["****"],
-    "rs_window": "Last 4 weeks",
-    "tm_theme": "Inflation",
-    "tm_scopes": ["USD"],
     "cc_country": "US",
     "cc_themes": ["Labor"],
     "cc_include_live": True,
@@ -111,7 +109,6 @@ fake_session = {
     "sb_levels": ["***", "****"],
     "sb_time_window": "All",
     "refresh_token": 7,
-    "active_command": {"query": "CPI", "regions": ["USD"]},
     # tracker the helper itself writes
     "_prev_scope": "USD",
     # something unrelated the user might have set
@@ -124,8 +121,7 @@ expect("_reset_state_for_scope returns the same session dict",
        returned is fake_session)
 
 # Tab-local keys are gone.
-for key in ("mn_select", "rs_query", "rs_scopes", "rs_levels", "tm_theme",
-            "tm_scopes", "cc_themes", "cc_only_known", "cc_table"):
+for key in ("mn_select", "cc_themes", "cc_only_known", "cc_table"):
     expect(f"{key} cleared", key not in fake_session,
            f"still present: {fake_session.get(key)!r}")
 
@@ -137,10 +133,9 @@ expect("sb_time_window preserved", fake_session.get("sb_time_window") == "All")
 expect("refresh_token preserved", fake_session.get("refresh_token") == 7)
 expect("show_cmd_help preserved", fake_session.get("show_cmd_help") is True)
 
-# active_command is wiped (carries stale region filters).
-expect("active_command reset to empty dict",
-       fake_session.get("active_command") == {},
-       f"got {fake_session.get('active_command')!r}")
+# Command bar was removed; active_command is no longer touched by reset.
+expect("active_command not present after reset",
+       "active_command" not in fake_session)
 
 # Catalogue is pre-seeded to the new scope's representative country.
 expect("cc_country re-seeded to Eurozone for EUR",
@@ -157,12 +152,12 @@ expect("_prev_scope advanced to EUR", fake_session.get("_prev_scope") == "EUR")
 # ---------------------------------------------------------------------------
 fake_session_pm = {
     "cc_country": "Germany",  # leftover from EUR session
-    "rs_query": "stale",
+    "cc_themes": ["Inflation"],
     "_prev_scope": "EUR",
 }
 streamlit_app._reset_state_for_scope("WEEKPM", session=fake_session_pm)
-expect("PM scope: rs_query cleared",
-       "rs_query" not in fake_session_pm)
+expect("PM scope: cc_themes cleared",
+       "cc_themes" not in fake_session_pm)
 # cc_country is cleared along with the rest of the catalogue keys; PM scopes
 # leave it absent rather than reseed it. The widget will fall back to its
 # alphabetical-first option on next render.
