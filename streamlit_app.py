@@ -37,6 +37,7 @@ from core.parsers import (
     extract_blocks,
     extract_central_bank_tape_text,
     extract_macro_note_versions,
+    extract_macro_synthesis,
     extract_releases,
     releases_from_load_results,
     split_top_level_sections,
@@ -318,11 +319,22 @@ def tab_weekly_monitor(state):
             render_central_bank_tape(tape_text, cb_releases)
 
 
+# Macro Synthesis cross-week view: signal expanders in this fixed order.
+_SYNTH_SIGNAL_ORDER = [
+    "Growth", "Labor", "Inflation", "Policy Constraint", "Financial Conditions",
+]
+_SYNTH_DEFAULT_WEEKS = 4
+
+
 def tab_macro_synthesis(state):
-    """Read-only view of weekly file sections A (Macro Synthesis) and
-    B (Signal Scoreboard). Pulls from the scope's frozen-week file. The
-    actual release archive (section C) is intentionally NOT shown here --
-    that's covered by Weekly Monitor.
+    """Cross-week Macro Synthesis view for the selected scope.
+
+    Compares the most recent N weeks (default 4, newest-first):
+      - one expander gathering each week's A. MACRO SYNTHESIS prose, and
+      - one expander per scoreboard signal (Growth, Labor, Inflation, Policy
+        Constraint, Financial Conditions) gathering that signal's line and
+        supporting evidence across the weeks.
+    The release archive (C) and central bank tape are NOT shown here.
     """
     scope = state["scope"]
     scope_file = SCOPE_FILES.get(scope, {}).get("frozen_week", "")
@@ -348,60 +360,72 @@ def tab_macro_synthesis(state):
         f"File: `{scope_file}`  |  Scope: `{scope}`  |  {source_badge(result)}"
     )
 
-    # Sort weeks latest-first; default to the latest. Each weekly block
-    # has its own A/B/C sections.
+    # Week entries, newest-first.
     entries = []
     for b in scope_blocks:
         label, start, end = block_data_window(b)
         entries.append({"block": b, "label": label, "start": start, "end": end})
     entries.sort(key=lambda e: e["start"] or _dt.date.min, reverse=True)
 
+    # How many recent weeks to compare (default 4).
     if len(entries) > 1:
-        labels = [e["label"] or f"{e['block'].stem} (no window)" for e in entries]
-        idx = st.selectbox(
-            "Week",
-            options=list(range(len(entries))),
-            format_func=lambda i: labels[i],
-            index=0,
-            key=f"ms_week_{scope}",
-            help="Default = latest week. Pick an older week to see its A+B.",
+        n_weeks = st.number_input(
+            "Weeks to compare (most recent)",
+            min_value=1,
+            max_value=len(entries),
+            value=min(_SYNTH_DEFAULT_WEEKS, len(entries)),
+            step=1,
+            key=f"ms_nweeks_{scope}",
         )
     else:
-        idx = 0
+        n_weeks = 1
+    recent = entries[: int(n_weeks)]
 
-    selected = entries[idx]
-    block = selected["block"]
-    sections = split_top_level_sections(block.raw_text)
-    a_b = [s for s in sections if s[0] in ("A", "B")]
-
-    if not a_b:
+    parsed = [(e, extract_macro_synthesis(e["block"])) for e in recent]
+    if not any(syn["synthesis"] or syn["signals"] for _e, syn in parsed):
         st.info(
-            "No A/B synthesis sections found in this week's block. The "
-            "file may not yet contain the synthesis layer for this window."
+            "No A/B synthesis sections found in the recent weeks. The file "
+            "may not yet contain the synthesis layer for this window."
         )
         return
 
-    if selected["label"]:
-        st.markdown(f"#### Data window: {selected['label']}")
+    def _wk(entry):
+        return entry["label"] or entry["block"].stem
 
-    # One-click export of A+B as plain text -- LLM-ready, mirrors the
-    # Catalogue export contract.
-    export_text = "\n\n".join(
-        f"{header}\n\n{body}".strip() for _letter, header, body in a_b
-    ).rstrip() + "\n"
-    end_label = (selected["end"].isoformat() if selected["end"]
-                 else (selected["start"].isoformat() if selected["start"] else "latest"))
-    st.download_button(
-        "Download A+B (.txt)",
-        data=export_text,
-        file_name=f"{scope}_synthesis_{end_label}.txt".replace(" ", "_"),
-        mime="text/plain",
-        key=f"ms_download_{scope}_{idx}",
+    # 1) MACRO SYNTHESIS prose across weeks (newest-first).
+    syn_header = next(
+        (syn["synthesis_header"] for _e, syn in parsed if syn["synthesis_header"]),
+        f"{scope} WEEK — MACRO SYNTHESIS",
     )
+    syn_label = syn_header
+    if len(syn_label) > 3 and syn_label[0] in "ABCD" and syn_label[1:3] == ". ":
+        syn_label = syn_label[3:]
+    with st.expander(syn_label, expanded=False):
+        any_syn = False
+        for e, syn in parsed:
+            if syn["synthesis"]:
+                any_syn = True
+                st.markdown(f"**{_wk(e)}**")
+                st.code(syn["synthesis"], language="text", wrap_lines=True)
+        if not any_syn:
+            st.caption("No synthesis prose in the selected weeks.")
 
-    for _letter, header, body in a_b:
-        st.markdown(f"### {header}")
-        st.code(body, language="text", wrap_lines=True)
+    # 2) One expander per scoreboard signal, in the requested order, each
+    #    gathering that signal across the weeks (newest-first).
+    for sig_name in _SYNTH_SIGNAL_ORDER:
+        rows = []
+        for e, syn in parsed:
+            match = next((s for s in syn["signals"] if s[0] == sig_name), None)
+            if match:
+                rows.append((e, match))
+        if not rows:
+            continue
+        latest_glyph = rows[0][1][1]
+        with st.expander(f"{sig_name}: {latest_glyph}", expanded=False):
+            for e, (name, glyph, evidence) in rows:
+                st.markdown(f"**{_wk(e)}**")
+                body = f"{name}: {glyph}\n{evidence}".rstrip()
+                st.code(body, language="text", wrap_lines=True)
 
 
 _MACRO_NOTE_VIEWS = ["Latest note only", "Previous notes", "All notes archive"]
