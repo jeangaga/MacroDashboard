@@ -427,6 +427,21 @@ def tab_macro_synthesis(state):
                 body = f"{name}: {glyph}\n{evidence}".rstrip()
                 st.code(body, language="text", wrap_lines=True)
 
+    # 3) KEY RELEASES TO DIG INTO across weeks (newest-first). The section
+    #    name carries the count ("3 KEY RELEASES" / "5 KEY RELEASES"); use the
+    #    latest week's header for the band label.
+    kr_rows = [(e, syn) for e, syn in parsed if syn.get("key_releases")]
+    if kr_rows:
+        kr_label = next(
+            (syn["key_releases_header"] for _e, syn in parsed
+             if syn.get("key_releases_header")),
+            "KEY RELEASES TO DIG INTO",
+        )
+        with st.expander(kr_label, expanded=False):
+            for e, syn in kr_rows:
+                st.markdown(f"**{_wk(e)}**")
+                st.code(syn["key_releases"], language="text", wrap_lines=True)
+
 
 _MACRO_NOTE_VIEWS = ["Latest note only", "Previous notes", "All notes archive"]
 
