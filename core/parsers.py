@@ -1001,7 +1001,11 @@ def extract_macro_synthesis(block):
                               # the next signal line.
         }
     """
-    result = {"synthesis_header": "", "synthesis": "", "signals": []}
+    result = {
+        "synthesis_header": "", "synthesis": "",
+        "signals": [],
+        "key_releases_header": "", "key_releases": "",
+    }
     if not block or not block.raw_text:
         return result
     b_body = ""
@@ -1021,6 +1025,28 @@ def extract_macro_synthesis(block):
     result["signals"] = [
         (name, glyph, "\n".join(lines).strip()) for name, glyph, lines in signals
     ]
+
+    # The "N KEY RELEASES TO DIG INTO" section is not letter-prefixed, so it
+    # is located via weekly_section_of and sliced up to the next top-level
+    # header (a letter section or another named narrative section).
+    all_lines = block.raw_text.splitlines()
+    heads = []
+    for i, line in enumerate(all_lines):
+        s = line.strip()
+        if not s:
+            continue
+        if _TOP_SECTION_RE.match(s):
+            heads.append((i, "letter", s))
+            continue
+        sec = weekly_section_of(line)
+        if sec in ("central_bank_tape", "signal_tension", "key_releases", "red_team"):
+            heads.append((i, sec, s))
+    for k, (idx, kind, hdr) in enumerate(heads):
+        if kind == "key_releases":
+            end = heads[k + 1][0] if k + 1 < len(heads) else len(all_lines)
+            result["key_releases_header"] = hdr
+            result["key_releases"] = "\n".join(all_lines[idx + 1:end]).strip()
+            break
     return result
 
 
