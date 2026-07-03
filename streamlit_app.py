@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import re
 
 import pandas as pd
 import streamlit as st
@@ -446,26 +447,54 @@ def tab_macro_synthesis(state):
 _MACRO_NOTE_VIEWS = ["Latest note only", "Previous notes", "All notes archive"]
 
 
-def _macro_note_versions(blocks):
-    """Order parsed note blocks (already split by Data window) so the most
-    recent version is first.
+_AS_OF_RE = re.compile(r"^\s*As of:\s*(.+?)\s*$", re.MULTILINE)
 
-    Sort key: end-date desc, start-date desc, then stable order. Blocks with
-    no detectable window sink to the bottom but keep their original order.
+
+def _note_as_of_date(block):
+    """Parse the `As of:` version stamp at the top of a macro note.
+
+    This is the authoritative version date and is always written in a clean,
+    parseable form (e.g. "30 June 2026"). It is preferred over the block's
+    `Data window:` end date, which can be fuzzy prose like
+    "late May to late June 2026" that `parse_release_date` cannot parse.
+    Returns a date or None.
+    """
+    if block is None or not getattr(block, "raw_text", ""):
+        return None
+    m = _AS_OF_RE.search(block.raw_text)
+    if not m:
+        return None
+    return parse_release_date(m.group(1))
+
+
+def _macro_note_versions(blocks):
+    """Order parsed note blocks (in document order) so the most recent
+    version is first.
+
+    Files store the newest note ON TOP, so document order alone already puts
+    the latest first. To be robust we sort by the `As of:` version date when
+    present, then the data-window end date, then reverse document order so the
+    top-of-file note wins any remaining tie. Notes whose `As of:` date cannot
+    be parsed fall back to those secondary keys rather than sinking to the
+    bottom, which previously caused a newer note with fuzzy `Data window:`
+    prose (e.g. "late May to late June 2026") to be ranked below an older
+    note that happened to have a clean, parseable window.
     """
     annotated = []
     for i, b in enumerate(blocks):
         label, start, end = block_data_window(b)
-        annotated.append((b, label, start, end, i))
+        as_of = _note_as_of_date(b)
+        annotated.append((b, label, start, end, i, as_of))
     annotated.sort(
         key=lambda x: (
-            x[3] or _dt.date.min,  # end-date desc primary
-            x[2] or _dt.date.min,  # start-date desc tiebreak
-            -x[4],                 # later original index wins ties (stable-ish)
+            x[5] or _dt.date.min,  # As of: version date desc primary
+            x[3] or _dt.date.min,  # data-window end-date desc tiebreak
+            -x[4],                 # top-of-file (earlier index) wins final ties
         ),
         reverse=True,
     )
-    return annotated
+    # Preserve the original 5-tuple shape expected by callers.
+    return [(b, label, start, end, i) for (b, label, start, end, i, _as_of) in annotated]
 
 
 def _seed_macro_note_picker(session_state, sidebar_scope, note_options):
