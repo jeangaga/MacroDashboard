@@ -577,6 +577,69 @@ def _inject_release_boundaries(text):
     return "\n".join(out)
 
 
+_RELEASE_DATE_LINE_RE = re.compile(r"(?i)^\s*release\s+date\s*[:–—-]")
+_IMPORTANCE_LINE_RE = re.compile(r"(?i)^\s*importance\s*[:–—-]")
+
+
+def _is_header_field_line(line):
+    s = line or ""
+    return bool(_RELEASE_DATE_LINE_RE.match(s) or _IMPORTANCE_LINE_RE.match(s))
+
+
+def _merge_split_release_headers(text):
+    """Re-attach release titles to their field lines in double-spaced blocks.
+
+    Newer weekly notes are written with a blank line between EVERY line:
+
+        NEW ZEALAND — BusinessNZ Performance of Services Index (Jun)
+        <blank>
+        Release Date: 13 Jul 2026 | Local Time: 00:30
+        <blank>
+        Importance: ***
+
+    The paragraph splitter then separates the country-dashed title from the
+    Release Date / Importance fields, so the release grouper never sees a
+    flagged paragraph that also carries the title -- cards surface as
+    '1. Reuters Data' with no country and country filtering finds nothing.
+
+    Remove the blank lines between such a title and its (up to two) field
+    lines so they land in one paragraph again. Titles already adjacent to
+    their fields (older formats) cross no blank line and are left untouched.
+    """
+    if not text or "Release Date:" not in text:
+        return text
+    lines = text.split("\n")
+    n = len(lines)
+    out = []
+    i = 0
+    while i < n:
+        line = lines[i]
+        merged = None
+        j = i + 1
+        if _looks_like_release_title(line):
+            fields = []
+            crossed_blank = False
+            while len(fields) < 2:
+                k = j
+                while k < n and not lines[k].strip():
+                    k += 1
+                if k >= n or not _is_header_field_line(lines[k]):
+                    break
+                if k > j:
+                    crossed_blank = True
+                fields.append(lines[k])
+                j = k + 1
+            if fields and crossed_blank:
+                merged = [line] + fields
+        if merged:
+            out.extend(merged)
+            i = j
+        else:
+            out.append(line)
+            i += 1
+    return "\n".join(out)
+
+
 def _looks_like_preamble(paragraph):
     """A paragraph qualifies as a release preamble ONLY when its first
     non-empty line itself looks like a real release title, i.e. has BOTH
@@ -624,7 +687,8 @@ def extract_releases(block):
     # release's commentary must never run into the next section. Order
     # matters -- isolating first would inflate the blank-line count that the
     # injection heuristic uses to detect dense blocks, disabling it.
-    raw_text = _inject_release_boundaries(block.raw_text)
+    raw_text = _merge_split_release_headers(block.raw_text)
+    raw_text = _inject_release_boundaries(raw_text)
     raw_text = _isolate_section_headers(raw_text)
     paragraphs = _PARAGRAPH_SPLIT.split(raw_text)
 
@@ -808,7 +872,10 @@ def _first_meaningful_line(text):
 
 
 def _clean_title(title):
-    t = re.sub(r"\s*\|\s*\*{1,4}\s*$", "", title or "").strip()
+    # Markdown heading prefixes ("### JAPAN — ...") from the newer
+    # double-spaced note format are noise, not part of the title.
+    t = re.sub(r"^\s*#{1,6}\s*", "", title or "").strip()
+    t = re.sub(r"\s*\|\s*\*{1,4}\s*$", "", t).strip()
     t = re.sub(r"\s*\*{1,4}\s*$", "", t).strip()
     return t[:180]
 
