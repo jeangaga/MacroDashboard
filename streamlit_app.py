@@ -319,6 +319,79 @@ def tab_weekly_monitor(state):
         if cb_releases or tape_text:
             render_central_bank_tape(tape_text, cb_releases)
 
+    # For an individual DM/EM currency, the regional bucket file
+    # (DM_WEEK.txt / EM_WEEK.txt) may carry weeks more recent than the
+    # currency's own frozen file. Append those extra data windows below,
+    # showing ONLY this country's release cards (no week summary, no
+    # central-bank tape, no narrative sections).
+    regional_scope = ("DM" if scope in CURRENCY_SCOPES_DM
+                      else "EM" if scope in CURRENCY_SCOPES_EM
+                      else None)
+    if regional_scope is None:
+        return
+    regional_file = SCOPE_FILES.get(regional_scope, {}).get("frozen_week", "")
+    scope_countries = set(SCOPE_COUNTRIES.get(scope, []))
+    if not regional_file or not scope_countries:
+        return
+
+    # Most recent date covered by the currency's own file. Regional windows
+    # ending on or before this date bring nothing new.
+    latest_end = max(
+        (e["end"] or e["start"] for e in entries if e["end"] or e["start"]),
+        default=None,
+    )
+
+    reg_result = _load_file(regional_file)
+    if reg_result.error or not reg_result.text:
+        return
+    reg_blocks = extract_blocks(reg_result.text, source_file=reg_result.filename)
+    reg_blocks = [b for b in reg_blocks if b.region == regional_scope] or reg_blocks
+
+    _NARRATIVE_SECTIONS = {"signal_tension", "key_releases", "red_team"}
+    newer_entries = []
+    for b in reg_blocks:
+        label, start, end = block_data_window(b)
+        newest = end or start
+        if newest is None:
+            continue
+        if latest_end is not None and newest <= latest_end:
+            continue
+        releases = dedup_releases(extract_releases(b))
+        releases = [
+            r for r in releases
+            if getattr(r, "section", "data") not in _NARRATIVE_SECTIONS
+            and getattr(r, "section", "data") != "central_bank_tape"
+            and scope_countries.intersection(r.countries or [])
+        ]
+        if min_importance:
+            releases = filter_releases(releases, min_importance=min_importance)
+        if releases:
+            newer_entries.append(
+                {"label": label, "start": start, "releases": releases}
+            )
+
+    if not newer_entries:
+        return
+
+    newer_entries.sort(key=lambda e: (e["start"] or _dt.date.min), reverse=True)
+
+    st.markdown("---")
+    st.subheader(f"More recent data from `{regional_file}`")
+    st.caption(
+        f"File: `{regional_file}`  |  Country: `{', '.join(sorted(scope_countries))}`"
+        f"  |  {source_badge(reg_result)}"
+    )
+    for entry in newer_entries:
+        st.markdown(f"### Data window: {entry['label']}")
+        indexed = list(enumerate(entry["releases"]))
+        indexed.sort(
+            key=lambda ir: (parse_release_date(ir[1].date_str) or _dt.date.min, ir[0]),
+            reverse=sort_desc,
+        )
+        st.caption(f"{len(indexed)} release(s) in this window")
+        for _, r in indexed:
+            render_release_card(r, default_expanded=False)
+
 
 # Macro Synthesis cross-week view: signal expanders in this fixed order.
 _SYNTH_SIGNAL_ORDER = [
