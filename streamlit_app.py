@@ -34,14 +34,18 @@ from core.normalize import (
     release_key,
 )
 from core.parsers import (
+    NARRATIVE_SECTION_IDS,
     block_data_window,
     extract_blocks,
     extract_central_bank_tape_text,
     extract_macro_note_versions,
     extract_macro_synthesis,
     extract_releases,
+    extract_week_sections,
+    has_week_section,
     releases_from_load_results,
     split_top_level_sections,
+    week_section_text,
 )
 from core.render import (
     importance_chip,
@@ -50,6 +54,7 @@ from core.render import (
     render_load_status,
     render_release_card,
     render_release_list,
+    render_week_note_sections,
     render_week_summary,
     source_badge,
 )
@@ -177,6 +182,215 @@ def sidebar():
     }
 
 
+# --- Week Recap tab ---------------------------------------------------------
+#
+# The landing tile: section I (COMPRESSED WEEK NOTE) of the most recent weeks,
+# side by side, so the last fortnight reads in one glance. Two weeks by default
+# -- the comparison the note is usually read for -- widenable to more.
+_RECAP_WEEK_OPTIONS = [1, 2, 3, 4, 6, 8]
+_RECAP_DEFAULT_WEEKS = 2
+# Beyond this the columns get too narrow to read, so extra weeks wrap onto a
+# new row rather than shrinking the existing ones.
+_RECAP_MAX_PER_ROW = 4
+
+
+# A standalone run of 2-4 asterisks: an importance flag ("**** US - CPI"), not
+# markdown emphasis. Must be whitespace-delimited on both sides, which is what
+# separates it from a `**bold**` pair or a `* ` bullet.
+_IMPORTANCE_FLAG_RE = re.compile(r"(?<!\S)(\*{2,4})(?!\S)")
+
+
+def _escape_importance_flags(text):
+    """Escape bare importance flags so markdown renders them literally.
+
+    Compressed notes are markdown: ~28 bullets and ~28 bold pairs each, which
+    is unreadable as preformatted text. But they also carry bare importance
+    flags, and `* **** **Employment Situation**` hands markdown an unmatched
+    emphasis run that swallows the flag. Escaping just the standalone runs
+    keeps `****` visible while leaving real `**bold**` and `* ` bullets alone.
+
+    Content is unchanged -- this only escapes markup so the stored text renders
+    as written.
+    """
+    if not text:
+        return text
+    return _IMPORTANCE_FLAG_RE.sub(
+        lambda m: "\\" + "\\".join(m.group(1)), text
+    )
+
+
+def _recap_entries(blocks):
+    """Weekly blocks paired with their compressed note, most recent first.
+
+    Sorted by data-window end then start, both descending. Blocks with no
+    window sink to the bottom in stable document order. `body` is the section
+    I text, or "" for a week that predates the A-I format.
+    """
+    entries = []
+    for i, b in enumerate(blocks or []):
+        label, start, end = block_data_window(b)
+        entries.append({
+            "block": b,
+            "label": label,
+            "start": start,
+            "end": end,
+            "body": week_section_text(b, "compressed"),
+            "idx": i,
+        })
+    entries.sort(
+        key=lambda e: (e["end"] or _dt.date.min,
+                       e["start"] or _dt.date.min,
+                       -e["idx"]),
+        reverse=True,
+    )
+    return entries
+
+
+def _recap_week_choices(available):
+    """Week-count options for the picker, capped at what the file actually has."""
+    choices = [n for n in _RECAP_WEEK_OPTIONS if n <= available]
+    if available and available not in choices:
+        choices.append(available)
+    return sorted(set(choices))
+
+
+def tab_week_recap(state):
+    """WEEK RECAP: the compressed note (I) for the last N weeks, in a row."""
+    scope = state["scope"]
+
+    # Always the scope's canonical frozen WEEK file -- the recap is about the
+    # week object itself, so it doesn't follow the sidebar's view selector
+    # (which can point at a macro note or PM file that has no section I).
+    scope_file = SCOPE_FILES.get(scope, {}).get("frozen_week", "")
+
+    st.header(f"{scope} - Week Recap")
+    if not scope_file:
+        st.warning(f"No weekly file configured for `{scope}`.")
+        return
+
+    result = _load_file(scope_file)
+    if result.error:
+        st.warning(result.error)
+    if not result.text:
+        st.info(f"No content available for `{scope_file}`.")
+        return
+
+    blocks = extract_blocks(result.text, source_file=result.filename)
+    scope_blocks = [b for b in blocks if b.region == scope] or blocks
+    entries = _recap_entries(scope_blocks)
+    with_note = [e for e in entries if e["body"]]
+
+    st.caption(
+        f"File: `{scope_file}`  |  Scope: `{scope}`  |  {source_badge(result)}"
+    )
+
+    if not with_note:
+        st.info(
+            f"No compressed week note (section I) in `{scope_file}`. Notes "
+            "written before the A-I format don't have one - read those in "
+            "full on the Weekly Monitor tab."
+        )
+        return
+
+    choices = _recap_week_choices(len(with_note))
+    default = (_RECAP_DEFAULT_WEEKS if _RECAP_DEFAULT_WEEKS in choices
+               else choices[-1])
+    ctl = st.columns([2, 3])
+    count = ctl[0].selectbox(
+        "Weeks to show",
+        options=choices,
+        index=choices.index(default),
+        key=f"wr_count_{scope}",
+        help="Most recent weeks first, newest on the left.",
+    )
+    raw = ctl[1].checkbox(
+        "Raw text",
+        value=False,
+        key=f"wr_raw_{scope}",
+        help="Show the note exactly as stored, markdown syntax and all. "
+             "Off renders it as written.",
+    )
+
+    shown = with_note[:count]
+    skipped = len(entries) - len(with_note)
+    if skipped:
+        st.caption(
+            f"{skipped} older week(s) in this file have no compressed note "
+            "and are not shown here."
+        )
+
+    for start in range(0, len(shown), _RECAP_MAX_PER_ROW):
+        row = shown[start:start + _RECAP_MAX_PER_ROW]
+        cols = st.columns(len(row))
+        for col, entry in zip(cols, row):
+            col.markdown(
+                f"**{entry['label'] or entry['block'].stem + ' (no data window)'}**"
+            )
+            if raw:
+                col.code(entry["body"], language="text", wrap_lines=True)
+            else:
+                col.markdown(_escape_importance_flags(entry["body"]))
+
+
+# --- Weekly Monitor note views ---------------------------------------------
+#
+# The canonical WEEK object is a lettered spine A-I. A-H are the authoritative
+# intelligence; I is a compressed derivative the note author wrote, which we
+# display verbatim and never regenerate from A-H.
+_WEEK_VIEW_PM = "PM view - compressed note (I)"
+_WEEK_VIEW_ANALYSIS = "Full analysis (A, B, D-H)"
+_WEEK_VIEW_ARCHIVE = "Release archive (C)"
+_WEEK_VIEW_FULL = "Full note (A-I)"
+_WEEK_VIEWS = [_WEEK_VIEW_PM, _WEEK_VIEW_ANALYSIS, _WEEK_VIEW_ARCHIVE, _WEEK_VIEW_FULL]
+
+# Narrative sections each view renders as text. C (the release archive) is not
+# listed: it is rendered as release cards, not as a raw body. D is included in
+# the analysis views, where it replaces the standalone tape card.
+_WEEK_VIEW_SECTIONS = {
+    _WEEK_VIEW_PM: ["compressed"],
+    _WEEK_VIEW_ANALYSIS: ["synthesis", "scoreboard", "central_bank_tape",
+                          "signal_tension", "key_releases", "red_team",
+                          "fx_consensus"],
+    _WEEK_VIEW_ARCHIVE: [],
+    _WEEK_VIEW_FULL: ["synthesis", "scoreboard", "central_bank_tape",
+                      "signal_tension", "key_releases", "red_team",
+                      "fx_consensus", "compressed"],
+}
+
+# Views that render the section-C release cards.
+_WEEK_VIEWS_WITH_RELEASES = {_WEEK_VIEW_ARCHIVE, _WEEK_VIEW_FULL}
+
+
+def _default_week_view(blocks):
+    """Pick the Weekly Monitor's default note view for a set of weekly blocks.
+
+    Section I is the intended quick view, but it only exists in the new note
+    format -- every note written before it would render as a blank tab. So the
+    PM view is the default only when at least one displayed week actually has
+    an I, and otherwise we fall back to the release archive (the behaviour this
+    tab has always had).
+    """
+    for b in blocks or []:
+        if has_week_section(b, "compressed"):
+            return _WEEK_VIEW_PM
+    return _WEEK_VIEW_ARCHIVE
+
+
+def _seed_week_view(session_state, key, default_view):
+    """Seed the note-view picker without overriding a manual choice.
+
+    Streamlit ignores a selectbox's `index=` once the keyed widget has a value
+    in session_state, so the default has to be written in directly. Only writes
+    when the key is absent, or when the previously seeded default has changed
+    (i.e. the user moved to a scope/week whose format differs).
+    """
+    prev_key = key + "__seeded"
+    if key not in session_state or session_state.get(prev_key) != default_view:
+        session_state[key] = default_view
+        session_state[prev_key] = default_view
+    return session_state[key]
+
+
 def tab_weekly_monitor(state):
     scope = state["scope"]
     view = state["view"]
@@ -241,10 +455,7 @@ def tab_weekly_monitor(state):
             )
             reg_blocks = ([b for b in reg_blocks if b.region == regional_scope]
                           or reg_blocks)
-            _EXCLUDED_SECTIONS = {
-                "signal_tension", "key_releases", "red_team",
-                "central_bank_tape",
-            }
+            _EXCLUDED_SECTIONS = set(NARRATIVE_SECTION_IDS) | {"central_bank_tape"}
             for b in reg_blocks:
                 label, start, end = block_data_window(b)
                 newest = end or start
@@ -291,12 +502,35 @@ def tab_weekly_monitor(state):
     else:
         selected_entries = entries
 
-    sort_desc = st.checkbox(
-        "Sort releases newest-first",
-        value=False,
-        key=f"wm_sort_{scope}_{view}",
-        help="Off = chronological order (Mon to Fri). On = newest first.",
+    # Which parts of the lettered A-I spine to show. Default is the PM view
+    # when the displayed weeks actually have a section I, else the release
+    # archive (see _default_week_view).
+    view_key = f"wm_note_view_{scope}_{view}"
+    _seed_week_view(
+        st.session_state, view_key,
+        _default_week_view([e["block"] for e in selected_entries
+                            if e.get("regional_releases") is None]),
     )
+    note_view = st.selectbox(
+        "Note view",
+        options=_WEEK_VIEWS,
+        key=view_key,
+        help="A-H are the authoritative week object; I is the author's "
+             "compressed PM version of it, shown verbatim. Notes predating "
+             "the A-I format have only A, B, C plus unlettered narrative "
+             "sections, and fall back to the release archive.",
+    )
+    show_releases = note_view in _WEEK_VIEWS_WITH_RELEASES
+
+    if show_releases:
+        sort_desc = st.checkbox(
+            "Sort releases newest-first",
+            value=False,
+            key=f"wm_sort_{scope}_{view}",
+            help="Off = chronological order (Mon to Fri). On = newest first.",
+        )
+    else:
+        sort_desc = False
 
     min_importance = min(levels, key=len) if levels else None
 
@@ -312,13 +546,34 @@ def tab_weekly_monitor(state):
 
         if regional_rels is not None:
             # Regional supplement week: country-filtered release cards only.
+            # These weeks are borrowed from the regional file and carry no
+            # narrative spine of their own, so the note view doesn't apply.
             releases = list(regional_rels)
         else:
-            # Per-week narrative summary (Synthesis / Scoreboard / Signal
-            # Tension / Key Releases / Red Team), collapsed by default with
-            # the scoreboard glyphs in the row. Sits between the data-window
-            # header and the cards.
-            render_week_summary(b)
+            # Narrative sections for the selected view, in the note's own
+            # document order. The PM view opens expanded -- it exists to be
+            # read at a glance.
+            n_sections = render_week_note_sections(
+                b, _WEEK_VIEW_SECTIONS[note_view],
+                expanded=(note_view == _WEEK_VIEW_PM),
+            )
+            if not n_sections and not show_releases:
+                missing = ("a compressed note (I)" if note_view == _WEEK_VIEW_PM
+                           else "narrative sections")
+                st.info(
+                    f"This week's note has no {missing}. It predates the A-I "
+                    f"format - switch to `{_WEEK_VIEW_ARCHIVE}` to read it."
+                )
+            if not show_releases:
+                continue
+
+            if note_view == _WEEK_VIEW_ARCHIVE:
+                # Per-week narrative summary (Synthesis / Scoreboard / Signal
+                # Tension / Key Releases / Red Team), collapsed by default with
+                # the scoreboard glyphs in the row. Sits between the data-window
+                # header and the cards. Skipped in the Full note view, which
+                # already renders those sections individually.
+                render_week_summary(b)
 
             releases = extract_releases(b)
             # Dedup by stable key (country|normalized|date|importance) so the
@@ -332,17 +587,14 @@ def tab_weekly_monitor(state):
         # AFTER the data releases, rather than as peer cards interleaved by
         # date. Split it out here.
         #
-        # The narrative sections (SIGNAL TENSION CHECK, "N KEY RELEASES TO DIG
-        # INTO", RED TEAM QUESTIONS) only *reference* releases -- they are
-        # commentary, not the release archive. Their importance-flagged,
-        # country-dashed lines (e.g. "**** Japan - CGPI (10 Jun)") otherwise
-        # get parsed as phantom peer release cards that duplicate the real
-        # archive entries. Keep them out of the displayed data stream.
-        # NOTE: "synthesis" is intentionally NOT excluded -- "C. FULL RELEASE
-        # ARCHIVE" maps to that section id, so it carries the *real* releases.
-        _NARRATIVE_SECTIONS = {
-            "signal_tension", "key_releases", "red_team",
-        }
+        # The narrative sections (E SIGNAL TENSION CHECK, F KEY RELEASES, G RED
+        # TEAM, H MARKET-CONSENSUS SCAN, I COMPRESSED NOTE) only *reference*
+        # releases -- they are commentary, not the release archive. Their
+        # importance-flagged, country-dashed lines (e.g. "**** Japan - CGPI
+        # (10 Jun)") otherwise get parsed as phantom peer release cards that
+        # duplicate the real archive entries. Keep them out of the data stream.
+        # NOTE: "archive" (section C) and "synthesis"/"scoreboard" (A/B) are
+        # intentionally NOT excluded -- C carries the *real* releases.
         if regional_rels is not None:
             cb_releases = []
             data_releases = releases
@@ -352,7 +604,7 @@ def tab_weekly_monitor(state):
                            if getattr(r, "section", "data") == "central_bank_tape"]
             data_releases = [r for r in releases
                              if getattr(r, "section", "data") != "central_bank_tape"
-                             and getattr(r, "section", "data") not in _NARRATIVE_SECTIONS]
+                             and getattr(r, "section", "data") not in NARRATIVE_SECTION_IDS]
             tape_text = extract_central_bank_tape_text(b)
 
         if not data_releases and not (cb_releases or tape_text):
@@ -374,8 +626,10 @@ def tab_weekly_monitor(state):
         for r in sorted_releases:
             render_release_card(r, default_expanded=False)
 
-        # Central Bank Tape last, as one grouped card.
-        if cb_releases or tape_text:
+        # Central Bank Tape last, as one grouped card. Only in the archive
+        # view -- the analysis and full-note views already render section D
+        # in its own right, and two copies of the tape is worse than none.
+        if (cb_releases or tape_text) and note_view == _WEEK_VIEW_ARCHIVE:
             render_central_bank_tape(tape_text, cb_releases)
 
 
@@ -1115,19 +1369,22 @@ def main():
     )
     st.caption(f"Current scope: `{state['scope']}`")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Week Recap",
         "Weekly Monitor",
         "Macro Synthesis",
         "Macro Notes",
         "Country Release Catalogue",
     ])
     with tab1:
-        tab_weekly_monitor(state)
+        tab_week_recap(state)
     with tab2:
-        tab_macro_synthesis(state)
+        tab_weekly_monitor(state)
     with tab3:
-        tab_macro_notes(state)
+        tab_macro_synthesis(state)
     with tab4:
+        tab_macro_notes(state)
+    with tab5:
         tab_country_release_catalogue()
 
 

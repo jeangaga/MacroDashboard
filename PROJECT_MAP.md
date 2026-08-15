@@ -91,7 +91,15 @@ Release Catalogue. Sidebar drives scope/view/importance/themes/time-window.
 
 ### Tab functions
 
-- `tab_weekly_monitor(state)` — loads `SCOPE_FILES[scope][view]`, splits blocks by data window, deduplicates, week selector defaults to **All weeks** (`index=0`), sort order user-toggleable.
+- `tab_week_recap(state)` — **first tab.** Section `I` of the most recent weeks, side by side. Always reads `SCOPE_FILES[scope]["frozen_week"]` (deliberately *not* the sidebar view, which can point at a macro note or PM file that has no section I). Newest on the left.
+- `_recap_entries(blocks)` — blocks paired with their compressed body, sorted end-date then start-date descending; window-less blocks sink in stable document order. `body` is `""` for a pre-A-I week.
+- `_recap_week_choices(available)` — the week-count ladder (`_RECAP_WEEK_OPTIONS` = 1/2/3/4/6/8) capped at what the file actually holds, plus the exact count when it falls between rungs. `_RECAP_DEFAULT_WEEKS` = 2, `_RECAP_MAX_PER_ROW` = 4 (beyond that weeks wrap to a new row instead of shrinking).
+- `_escape_importance_flags(text)` / `_IMPORTANCE_FLAG_RE` — compressed notes are markdown (~28 bullets and ~28 bold pairs each), so they render as markdown, not preformatted text. But they also carry bare importance flags, and `* **** **Employment Situation**` hands markdown an unmatched emphasis run that swallows the `****`. This escapes only whitespace-delimited runs of 2–4 asterisks, leaving `**bold**` pairs and `* ` bullets untouched. The **Raw text** checkbox (`wr_raw_{scope}`) switches to verbatim `st.code` instead.
+- `tab_weekly_monitor(state)` — loads `SCOPE_FILES[scope][view]`, splits blocks by data window, deduplicates, week selector defaults to **All weeks** (`index=0`), sort order user-toggleable. Also carries the **Note view** selector over the A–I spine.
+- `_WEEK_VIEWS` / `_WEEK_VIEW_SECTIONS` — the four note views and the section ids each renders: PM view = `I`; Full analysis = `A,B,D–H`; Release archive = `C` (release cards + grouped tape card); Full note = `A–I`. `C` is never in a section list — it renders as cards, via `_WEEK_VIEWS_WITH_RELEASES`.
+- `_default_week_view(blocks)` — PM view when any displayed week has an `I`, else Release archive. Without the fallback every pre-A-I note would open blank.
+- `_seed_week_view(session_state, key, default_view)` — writes the default into `session_state` (streamlit ignores `index=` once a keyed widget has a value) without stomping a manual choice; re-seeds only when the computed default itself changes. Same problem `_seed_macro_note_picker` solves for Macro Notes.
+- The grouped Central Bank Tape card renders **only** in Release archive — the analysis and full-note views already render `D` in its own right, and two copies of the tape is worse than none.
 - `_macro_note_versions(blocks)` — sorts note blocks by end-date desc, start-date desc, stable index. Window-less blocks sink to bottom. Returns 5-tuples `(block, label, start, end, idx)`.
 - `tab_macro_notes(state)` — file selector defaults to scope's macro-note file. View dropdown picks Latest only / Previous / All archive. Header (`File: … | Scope: … | Latest data window: …`) rendered exactly once.
 - `tab_release_search(sidebar_state, command_state)` — query / scopes / themes / levels / time-window / release-type / countries / deep-search. Results shown as Cards or Table.
@@ -101,7 +109,7 @@ Release Catalogue. Sidebar drives scope/view/importance/themes/time-window.
 
 ### Entry point
 
-- `main()` — order: `sidebar()` -> `_handle_scope_change(state['scope'])` -> title -> `Current scope: {scope}` caption -> `command_bar()` -> 5 tabs.
+- `main()` — order: `sidebar()` -> `_handle_scope_change(state['scope'])` -> title -> `Current scope: {scope}` caption -> 5 tabs: **Week Recap**, Weekly Monitor, Macro Synthesis, Macro Notes, Country Release Catalogue.
 - `if __name__ == "__main__": main()`.
 
 ---
@@ -198,6 +206,23 @@ Two-layer parser: file → blocks → releases. **Critical regression-tested cod
 - `_looks_like_preamble(p)` — first-paragraph title detection.
 - `_best_title_line(p)`, `_first_meaningful_line(text)`, `_clean_title(title)` — title normalization.
 - `extract_releases(block)` — main entry. Splits raw_text on importance flags, runs the title guard, extracts `(title, importance, date_str, countries, themes)`, returns list of `Release`.
+
+**Weekly section spine (A–I)**
+
+The canonical WEEK object is a lettered spine. **The letter is the parser
+identifier**; the title after it is never matched on.
+
+- `LETTER_SECTION_IDS` — `A→synthesis, B→scoreboard, C→archive, D→central_bank_tape, E→signal_tension, F→key_releases, G→red_team, H→fx_consensus, I→compressed`. `SECTION_ID_LETTERS` is the inverse; `WEEK_SECTION_LETTERS` the ordered list.
+- `NARRATIVE_SECTION_IDS` — `{signal_tension, key_releases, red_team, fx_consensus, compressed}`. These sections *quote* releases, so anything parsed out of them would surface as a phantom peer card duplicating the real archive entry. Display layers exclude them from the data stream. `archive`/`synthesis`/`scoreboard` are deliberately **not** in this set — C carries the real releases.
+- `_TOP_SECTION_RE` — `^([A-I])\.\s+(.+)$`.
+- `_top_section_letter(line)` — letter of a top-level header, else None. Requires the line to be ALL-CAPS (`_is_upper_header`) so prose beginning `A. The Fed…` and the numbered sub-headings inside a release (`1. Reuters Data`, `3. Comment - Economist Layer`) never register as spine entries. Legacy mixed-case `C. Full Release Archive` still passes via `_is_synthesis_header_line`.
+- `weekly_section_of(line)` — letter first, then the unlettered ALL-CAPS name patterns. `D. CENTRAL BANK TAPE` and a bare `CENTRAL BANK TAPE` are indistinguishable to every caller.
+- `extract_week_sections(block)` — **the normalising primitive.** Returns ordered `{"letter", "id", "header", "body", "lettered"}` dicts. Old notes (A–C lettered, D–G unlettered, no H/I) are mapped onto the same canonical letters, with `lettered=False` recording that it was inferred. Accepts a Block or a raw string.
+- `week_section_text(block, section_id)` — one section's body, or `""`. Joins duplicates rather than dropping them.
+- `has_week_section(block, section_id)` — whether the header exists at all. Deliberately distinct from "non-empty body": a `D` holding only the *No validated central-bank tape supplied for this window.* sentinel is present-but-empty, and the UI should say so rather than hide it.
+
+`split_top_level_sections` is letter-only (A–I) and so returns just A–C for old
+notes; use `extract_week_sections` when you want both formats normalised.
 
 **Integration helpers**
 
@@ -309,7 +334,14 @@ Importance, country, theme, date, release-type extraction. Pure module.
 
 ## tests/ — regression suites
 
-Each test runs as `python3 tests/test_*.py` and prints `N ok, M fail`. CI wrapper isn't formal; user runs all 8 manually. Total ~290 assertions across 1,150 lines.
+Each suite is a standalone script printing `N ok, M fail` and exiting non-zero
+on failure. Run them all with `py run_tests.py` (21 suites, 702 assertions,
+currently 0 failures). Individual suites still run directly, but the nine that
+import `streamlit_app` need the stub on `PYTHONPATH` — use the runner, or
+`-k <name>` to narrow it.
+
+`test_catalogue.py` predates the `N ok, M fail` convention and self-reports
+with bare asserts, so the runner shows it as `PASS (asserts, no count)`.
 
 - **test_catalogue.py** (115 lines) — synthetic Australia file; verifies `normalize_release_name` groups CPI/Labour Force correctly and the catalogue picks the latest occurrence per group.
 - **test_catalogue_sources.py** (227 lines, 109 checks) — `sources_for_country` priority order; `country_source_status` classification; commentary-fragment rejection (`_looks_like_commentary_fragment`); end-to-end synthetic block parsing; frozen-wins-over-live dedup.
@@ -318,12 +350,41 @@ Each test runs as `python3 tests/test_*.py` and prints `N ok, M fail`. CI wrappe
 - **test_macro_notes.py** (203 lines, 27 checks) — `_macro_note_versions` 5-tuple shape and end-date-desc sort; window-less blocks sink to bottom; end-to-end marker-file parsing; Weekly Monitor `index=0` "All weeks" default; Macro Notes scope-aware default; header rendered exactly once in `tab_macro_notes`.
 - **test_normalize.py** (48 lines, 17 checks) — `normalize_release_name` on a battery of titles: generic CPI, institutional CPI variants, U Mich, NY Fed, trimmed mean, HICP, PCE, PPI, import prices, low-confidence fallback.
 - **test_scope_reset.py** (232 lines, 92 checks) — `default_catalogue_country` per scope; `_SCOPE_RESET_KEYS` coverage (clears tab-local, preserves sidebar/global); `_reset_state_for_scope` clears, preserves, pre-seeds catalogue; PM scopes don't seed `cc_country`; `main()` wires `_handle_scope_change` before `st.tabs()`; `_handle_scope_change` short-circuits on unchanged scope.
+- **test_week_recap.py** (46 checks) — the Week Recap tab. `_recap_entries` ordering (newest first, window-less last, empty/None safe); `_recap_week_choices` capping; end-to-end render at 1/2/3/5 weeks checking column layout, wrap at 4 per row, and newest-leftmost ordering; both render modes (markdown by default, `st.code` under **Raw text**); `_escape_importance_flags` unit cases including the real-world `* **** **Employment Situation**` line; the skipped-week caption; a file with no section I; and that Week Recap is wired in as the first tab.
+- **test_week_sections_ai.py** (76 checks) — the A–I lettered spine. Letter-is-the-identifier (including retitled sections and prose that merely starts with a letter); nine sections in document order; C bounded at D; D present when it holds only the no-tape sentinel; F under-filled below its "5" title; `###` subsections staying inside H and I; releases tagged by originating section; the compressed note's quoted release not becoming a phantom card; and the full backward-compat path mapping old unlettered headers onto D–G with `lettered=False`.
+- **test_weekly_views.py** (32 checks) — end-to-end render of `tab_weekly_monitor` under all four note views using the offline stub, with `_load_file` monkeypatched to a fixture. Asserts each view renders without raising and shows exactly the sections it promises: PM = I only, Full analysis = A,B,D–H with no cards, Archive = cards + one tape card, Full note = sections + cards with the tape *not* duplicated. Also that an old note under PM view explains itself instead of rendering blank.
 - **test_weekly.py** (148 lines, 16 checks) — `find_data_windows` finds both windows in a multi-week file; `extract_blocks` splits into one Block per window; sub-blocks get correct windows; weekly releases extracted (no day-header rows); `block_data_window` infers from dates when no explicit window; `split_block_by_data_window` no-op without markers; streamlit_app imports.
 
 ---
 
 ## Files not part of the runtime
 
+- `run_tests.py` (root) — offline test runner. Discovers `tests/test_*.py`, runs
+  each as a subprocess (isolated module state; a suite's `sys.exit()` can't kill
+  the runner), parses the trailing `N ok, M fail`, prints one summary and the
+  tail of anything that failed. Flags: `-k <substr>`, `-v`, `--real-streamlit`.
+  Handles two environment problems so suites don't have to: it puts
+  `tests/_stubs` on `PYTHONPATH`, and it prepends conda's `Library\bin` to
+  `PATH` when `import ssl` is broken (which otherwise breaks `requests`, and so
+  `utils.github`).
+- `tests/_stubs/streamlit.py` — offline stand-in for streamlit, ~380 lines.
+  Implements `cache_data` (bare + parameterised + `.clear()`), `session_state`
+  (dict with attribute access), `rerun`, `stop`, `set_page_config`,
+  `column_config`, layout containers (`columns`/`tabs`/`expander`/… as context
+  managers), and widgets that return their declared default or a test-seeded
+  value. Unmodelled calls resolve to recorded no-ops via a PEP-562 module
+  `__getattr__`, so new `st.*` calls in app code never break the run.
+  Test-control surface: `reset()`, `calls()`, `rendered_text()`,
+  `set_widget_value()`, `set_dataframe_selection()`, `rerun_count()`.
+
+  **Two deliberate divergences from real streamlit:** `rerun()` records and
+  returns instead of raising (callers continue past it), and widgets have no
+  re-run loop, so they never "remember" an interaction unless seeded.
+
+  **Placement is load-bearing.** The file is in `tests/_stubs/`, never the repo
+  root, and only `run_tests.py` puts that directory on the path. Streamlit Cloud
+  therefore always imports the real package even though this file ships in the
+  uploaded repo. Moving it up a level would shadow streamlit in production.
 - `smoke_test.py` (root) — older standalone smoke test that pre-dates `tests/`. Builds synthetic DM/EUR weekly files, exercises `extract_blocks`, `extract_releases`, `filter_releases`, `parse_command`, theme detection, country extraction. Still works but largely superseded by `tests/`.
 - `README.md` — run instructions and smoke-test invocation.
 - `requirements.txt` — pinned deps.
