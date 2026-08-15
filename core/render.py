@@ -133,6 +133,37 @@ def render_week_summary(block, *, default_expanded=False):
         st.code(body, language="text", wrap_lines=True)
 
 
+def render_week_note_sections(block, section_ids, *, expanded=False,
+                              empty_message=None):
+    """Render the given canonical sections (A-I) of a weekly block.
+
+    `section_ids` is an iterable of ids from `LETTER_SECTION_IDS` (e.g.
+    "synthesis", "central_bank_tape", "compressed"). Sections render in the
+    note's own document order, not the order of `section_ids`, and missing ones
+    are skipped silently -- older notes simply have fewer.
+
+    Bodies render verbatim. Nothing here regenerates a section: `H` (currency
+    market-consensus scan) is historical as of that note's DATA WINDOW and must
+    never be refreshed against today's market, and `I` (compressed note) is the
+    author's own derivative, never rebuilt from A-H.
+
+    Returns the number of sections rendered.
+    """
+    from core.parsers import extract_week_sections
+
+    wanted = set(section_ids or ())
+    sections = [s for s in extract_week_sections(block) if s["id"] in wanted]
+    if not sections:
+        if empty_message:
+            st.info(empty_message)
+        return 0
+    for s in sections:
+        with st.expander(s["header"], expanded=expanded):
+            st.code(s["body"] or "(section is empty)",
+                    language="text", wrap_lines=True)
+    return len(sections)
+
+
 def render_release_list(releases, *, empty_message="No matching releases.", limit=None):
     releases = list(releases)
     if not releases:

@@ -390,9 +390,82 @@ def _is_synthesis_header_line(line):
 _WEEKLY_SECTION_NAME_RES = [
     ("central_bank_tape", re.compile(r"^CENTRAL\s+BANK\s+TAPE\b")),
     ("signal_tension",    re.compile(r"^SIGNAL\s+TENSION\s+CHECK\b")),
-    ("key_releases",      re.compile(r"^\d+\s+KEY\s+RELEASES\s+TO\s+DIG\s+INTO\b")),
+    ("key_releases",      re.compile(r"^(?:\d+\s+)?KEY\s+RELEASES\s+TO\s+DIG\s+INTO\b")),
     ("red_team",          re.compile(r"^(?:RED\s+TEAM\s+QUESTIONS|SECOND\s+PASS\s+SCOUT)\b")),
+    ("fx_consensus",      re.compile(r"^(?:CURRENCY\s+)?MARKET[-\s]*CONSENSUS\s+SCAN\b")),
+    ("compressed",        re.compile(r"^COMPRESSED\s+WEEK\s+NOTE\b")),
 ]
+
+
+# --- Lettered top-level sections (A-I) --------------------------------------
+#
+# The canonical WEEK object is a lettered spine. THE LETTER IS THE PARSER
+# IDENTIFIER; the wording after it is not load-bearing and must never be
+# matched on, so a note can retitle a section without breaking the parser.
+#
+#   A. <SCOPE> WEEK - MACRO SYNTHESIS
+#   B. <SCOPE> MACRO SIGNAL SCOREBOARD
+#   C. FULL RELEASE ARCHIVE            (ends at D)
+#   D. CENTRAL BANK TAPE               (always present; body may be the
+#                                       "No validated central-bank tape
+#                                       supplied for this window." sentinel)
+#   E. SIGNAL TENSION CHECK
+#   F. 5 KEY RELEASES TO DIG INTO      (five is a maximum, not a quota)
+#   G. RED TEAM QUESTIONS
+#   H. CURRENCY MARKET-CONSENSUS SCAN  (historical, frozen as of the DATA
+#                                       WINDOW -- never refreshed)
+#   I. COMPRESSED WEEK NOTE            (PM digest; ### subsections)
+#
+# A-H are the authoritative intelligence object; I is a compressed derivative.
+#
+# Older notes letter only A-C and leave CENTRAL BANK TAPE / SIGNAL TENSION
+# CHECK / "N KEY RELEASES TO DIG INTO" / RED TEAM QUESTIONS unlettered. Those
+# keep working through _WEEKLY_SECTION_NAME_RES above and are mapped onto the
+# same canonical ids, so callers never branch on file format.
+LETTER_SECTION_IDS = {
+    "A": "synthesis",
+    "B": "scoreboard",
+    "C": "archive",
+    "D": "central_bank_tape",
+    "E": "signal_tension",
+    "F": "key_releases",
+    "G": "red_team",
+    "H": "fx_consensus",
+    "I": "compressed",
+}
+SECTION_ID_LETTERS = {sid: ltr for ltr, sid in LETTER_SECTION_IDS.items()}
+WEEK_SECTION_LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I"]
+
+# Sections that are narrative commentary rather than the release archive.
+# They quote releases ("**** Japan - CGPI (10 Jun)"), so anything parsed out of
+# them would otherwise surface as a phantom peer release card duplicating the
+# real archive entry. Display layers exclude these from the data stream.
+NARRATIVE_SECTION_IDS = frozenset({
+    "signal_tension", "key_releases", "red_team", "fx_consensus", "compressed",
+})
+
+_TOP_SECTION_RE = re.compile(r"^([A-I])\.\s+(.+)$")
+
+
+def _top_section_letter(line):
+    """Return the letter of a top-level lettered section header, else None.
+
+    Requires the line to read as a header (ALL-CAPS, per `_is_upper_header`)
+    so ordinary prose starting with "A. " and, more importantly, the numbered
+    sub-headings *inside* a release block ("1. Reuters Data",
+    "3. Comment - Economist Layer") are never mistaken for section spines.
+    Digits can't match `[A-I]` anyway; the caps guard covers the letter case.
+
+    The legacy mixed-case form ("C. Full Release Archive") is still accepted
+    via `_is_synthesis_header_line` so pre-existing files parse unchanged.
+    """
+    s = (line or "").strip()
+    m = _TOP_SECTION_RE.match(s)
+    if not m:
+        return None
+    if _is_upper_header(s) or _is_synthesis_header_line(s):
+        return m.group(1).upper()
+    return None
 
 
 def _is_upper_header(s):
@@ -410,15 +483,20 @@ def _is_upper_header(s):
 
 
 def weekly_section_of(line):
-    """Return the section id for a top-level weekly section header line, else
-    None. Synthesis dividers (A./B./C. ... SYNTHESIS/SCOREBOARD/ARCHIVE) map to
-    'synthesis'. Named sections must be ALL-CAPS to count as a boundary.
+    """Return the section id for a top-level weekly section header line, else None.
+
+    Letter first: `A.` through `I.` resolve through LETTER_SECTION_IDS, which is
+    the stable contract -- the title after the letter is never matched on.
+    Unlettered ALL-CAPS names (old format) fall back to the name patterns and
+    land on the same ids, so `D. CENTRAL BANK TAPE` and a bare
+    `CENTRAL BANK TAPE` are indistinguishable to every caller.
     """
+    letter = _top_section_letter(line)
+    if letter:
+        return LETTER_SECTION_IDS[letter]
     s = (line or "").strip()
     if not s:
         return None
-    if _is_synthesis_header_line(s):
-        return "synthesis"
     if not _is_upper_header(s):
         return None
     for sid, pat in _WEEKLY_SECTION_NAME_RES:
@@ -904,25 +982,20 @@ def block_data_window(block):
     return (label, s, e)
 
 
-_TOP_SECTION_RE = re.compile(r"^([A-D])\.\s+(.+)$")
-
-
 def split_top_level_sections(block_raw_text):
-    """Split a block's raw_text by top-level letter-prefixed sections
-    (`A. ...`, `B. ...`, `C. ...`, `D. ...`).
+    """Split a block's raw_text by top-level letter-prefixed sections (`A.`-`I.`).
 
-    Each weekly note is structured as:
-        A. ... MACRO SYNTHESIS         -- prose
-        B. ... SIGNAL SCOREBOARD       -- Growth/Labor/Inflation/...
-        C. FULL RELEASE ARCHIVE        -- the actual releases (already
-                                          rendered in Weekly Monitor)
-        D. ... (optional)
+    The canonical WEEK spine is A-I (see LETTER_SECTION_IDS). Older notes carry
+    only A-C plus unlettered narrative headers; this helper is letter-only, so
+    for those it returns just A-C -- use `extract_week_sections` when you want
+    both formats normalised onto the same letters.
 
-    This helper is letter-only (A through D), so a stray line like
-    `Q4. revisions ...` will not be confused for a section header.
-    Header line itself is included in the returned `header` field; the
-    `body` is everything from after the header up to (but not including)
-    the next top-level section header or end of text.
+    Letter-only matching means a stray `Q4. revisions ...` is not a header, and
+    the caps guard in `_top_section_letter` keeps the numbered sub-headings
+    inside a release block ("1. Reuters Data") out of the spine.
+
+    The header line itself is returned in `header`; `body` is everything after
+    it up to (but not including) the next top-level header or end of text.
 
     Returns ordered list of (letter, header_line, body) tuples.
     """
@@ -935,13 +1008,13 @@ def split_top_level_sections(block_raw_text):
     current_body = []
     for line in lines:
         stripped = line.strip()
-        m = _TOP_SECTION_RE.match(stripped) if stripped else None
-        if m:
+        letter = _top_section_letter(stripped) if stripped else None
+        if letter:
             if current_letter is not None:
                 sections.append(
                     (current_letter, current_header, "\n".join(current_body).rstrip())
                 )
-            current_letter = m.group(1).upper()
+            current_letter = letter
             current_header = stripped
             current_body = []
         elif current_letter is not None:
@@ -951,6 +1024,82 @@ def split_top_level_sections(block_raw_text):
             (current_letter, current_header, "\n".join(current_body).rstrip())
         )
     return sections
+
+
+def extract_week_sections(block):
+    """Normalise a weekly block onto its canonical A-I section spine.
+
+    Handles both formats transparently:
+      * new notes letter every section A-I;
+      * old notes letter only A-C and leave CENTRAL BANK TAPE / SIGNAL TENSION
+        CHECK / "N KEY RELEASES TO DIG INTO" / RED TEAM QUESTIONS unlettered.
+
+    Unlettered headers are mapped onto the letter they would carry today
+    (D/E/F/G), so callers address sections by id without knowing which format
+    produced the file. `lettered` records which it actually was.
+
+    Accepts a Block or a raw string. Returns an ordered list of dicts in
+    document order:
+
+        {"letter":   "D",
+         "id":       "central_bank_tape",
+         "header":   "D. CENTRAL BANK TAPE",   # verbatim header line
+         "body":     "...",                    # up to the next top-level header
+         "lettered": True}
+    """
+    raw = getattr(block, "raw_text", None)
+    if raw is None and isinstance(block, str):
+        raw = block
+    if not raw:
+        return []
+
+    lines = raw.splitlines()
+    heads = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        letter = _top_section_letter(s)
+        if letter:
+            heads.append((i, letter, LETTER_SECTION_IDS[letter], s, True))
+            continue
+        sid = weekly_section_of(line)
+        if sid:
+            heads.append((i, SECTION_ID_LETTERS.get(sid, ""), sid, s, False))
+
+    out = []
+    for k, (idx, letter, sid, hdr, lettered) in enumerate(heads):
+        end = heads[k + 1][0] if k + 1 < len(heads) else len(lines)
+        out.append({
+            "letter": letter,
+            "id": sid,
+            "header": hdr,
+            "body": "\n".join(lines[idx + 1:end]).strip(),
+            "lettered": lettered,
+        })
+    return out
+
+
+def week_section_text(block, section_id):
+    """Body of one canonical section (by id, e.g. "compressed"), or "".
+
+    A malformed note repeating a header has its bodies joined in document
+    order rather than silently losing the later ones.
+    """
+    parts = [s["body"] for s in extract_week_sections(block)
+             if s["id"] == section_id]
+    return "\n\n".join(p for p in parts if p).strip()
+
+
+def has_week_section(block, section_id):
+    """True when the block declares that section header at all.
+
+    Deliberately distinct from "has a non-empty body": `D. CENTRAL BANK TAPE`
+    carrying only the "No validated central-bank tape supplied for this
+    window." sentinel is present-but-empty, and the UI should say so rather
+    than hide the section as if the note never had one.
+    """
+    return any(s["id"] == section_id for s in extract_week_sections(block))
 
 
 # A scoreboard signal line in section B, e.g. "Growth: -", "Labor: +",
@@ -994,12 +1143,13 @@ def extract_week_summary(block):
         s = line.strip()
         if not s:
             continue
-        m = _TOP_SECTION_RE.match(s)
-        if m:
-            headers.append((i, "letter:" + m.group(1).upper(), s))
+        letter = _top_section_letter(s)
+        if letter:
+            headers.append((i, "letter:" + letter, s))
             continue
         sec = weekly_section_of(line)
-        if sec in ("central_bank_tape", "signal_tension", "key_releases", "red_team"):
+        if sec in ("central_bank_tape", "signal_tension", "key_releases", "red_team",
+                   "fx_consensus", "compressed"):
             headers.append((i, sec, s))
 
     # Slice each header's body up to the next header.
@@ -1019,8 +1169,12 @@ def extract_week_summary(block):
             found.setdefault(name, sm.group(2))
     signals = [(n, found[n]) for n in ("Growth", "Labor", "Inflation") if n in found]
 
-    # Narrative sections to surface, in document order.
-    wanted = {"letter:A", "letter:B", "signal_tension", "key_releases", "red_team"}
+    # Narrative sections to surface, in document order. Old format reaches
+    # these unlettered; new format reaches the same ones as E/F/G/H. Excludes
+    # the release archive (C), the central bank tape (D -- its own card) and
+    # the compressed note (I -- its own view).
+    wanted = {"letter:A", "letter:B", "letter:E", "letter:F", "letter:G", "letter:H",
+              "signal_tension", "key_releases", "red_team", "fx_consensus"}
     sections = [(hdr, body) for kind, hdr, body in spans if kind in wanted]
     return {"signals": signals, "sections": sections}
 
@@ -1102,11 +1256,14 @@ def extract_macro_synthesis(block):
         s = line.strip()
         if not s:
             continue
-        if _TOP_SECTION_RE.match(s):
-            heads.append((i, "letter", s))
+        letter = _top_section_letter(s)
+        if letter:
+            # Tag by canonical id, not the bare word "letter": in the new
+            # format KEY RELEASES arrives as "F." and must still be found.
+            heads.append((i, LETTER_SECTION_IDS[letter], s))
             continue
         sec = weekly_section_of(line)
-        if sec in ("central_bank_tape", "signal_tension", "key_releases", "red_team"):
+        if sec:
             heads.append((i, sec, s))
     for k, (idx, kind, hdr) in enumerate(heads):
         if kind == "key_releases":
