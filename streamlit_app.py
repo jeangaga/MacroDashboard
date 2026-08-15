@@ -42,9 +42,11 @@ from core.parsers import (
     extract_macro_synthesis,
     extract_releases,
     extract_week_sections,
+    filter_subsections,
     has_week_section,
     releases_from_load_results,
     split_top_level_sections,
+    subsection_titles,
     week_section_text,
 )
 from core.render import (
@@ -185,13 +187,10 @@ def sidebar():
 # --- Week Recap tab ---------------------------------------------------------
 #
 # The landing tile: section I (COMPRESSED WEEK NOTE) of the most recent weeks,
-# side by side, so the last fortnight reads in one glance. Two weeks by default
-# -- the comparison the note is usually read for -- widenable to more.
+# stacked newest-first so you read back through time by scrolling down. Two
+# weeks by default -- the comparison the note is usually read for.
 _RECAP_WEEK_OPTIONS = [1, 2, 3, 4, 6, 8]
 _RECAP_DEFAULT_WEEKS = 2
-# Beyond this the columns get too narrow to read, so extra weeks wrap onto a
-# new row rather than shrinking the existing ones.
-_RECAP_MAX_PER_ROW = 4
 
 
 # A standalone run of 2-4 asterisks: an importance flag ("**** US - CPI"), not
@@ -254,8 +253,39 @@ def _recap_week_choices(available):
     return sorted(set(choices))
 
 
+def _recap_subsection_titles(entries):
+    """Every `###` subsection title across the shown weeks, in document order.
+
+    Newest week first, so its running order sets the option order; titles a
+    newer note dropped still appear, appended where an older week has them.
+    """
+    seen = []
+    for entry in entries or []:
+        for title in subsection_titles(entry.get("body") or ""):
+            if title not in seen:
+                seen.append(title)
+    return seen
+
+
+def _seed_recap_sections(session_state, key, options):
+    """Default the subsection picker to everything, and keep it valid.
+
+    First render selects all. On later renders the stored selection is pruned
+    to options that still exist (weeks change, and a note may drop a
+    subsection), because streamlit rejects a default holding values that are
+    no longer in `options`. A selection pruned to nothing falls back to all,
+    so the tab can't get stuck showing an empty note.
+    """
+    if key not in session_state:
+        session_state[key] = list(options)
+        return session_state[key]
+    kept = [t for t in session_state[key] if t in options]
+    session_state[key] = kept if kept else list(options)
+    return session_state[key]
+
+
 def tab_week_recap(state):
-    """WEEK RECAP: the compressed note (I) for the last N weeks, in a row."""
+    """WEEK RECAP: the compressed note (I) for the last N weeks, newest first."""
     scope = state["scope"]
 
     # Always the scope's canonical frozen WEEK file -- the recap is about the
@@ -312,6 +342,23 @@ def tab_week_recap(state):
     )
 
     shown = with_note[:count]
+
+    # Subsection picker: the note's own ### parts (Regime / Scoreboard / Major
+    # Release Tape / ...). Everything is selected by default; narrowing it
+    # reads one part across several weeks instead of whole notes.
+    titles = _recap_subsection_titles(shown)
+    selected = None
+    if titles:
+        sec_key = f"wr_sections_{scope}"
+        _seed_recap_sections(st.session_state, sec_key, titles)
+        selected = st.multiselect(
+            "Parts of the note to show",
+            options=titles,
+            key=sec_key,
+            help="All parts by default. Narrow it to compare one part "
+                 "week over week.",
+        )
+
     skipped = len(entries) - len(with_note)
     if skipped:
         st.caption(
@@ -319,17 +366,25 @@ def tab_week_recap(state):
             "and are not shown here."
         )
 
-    for start in range(0, len(shown), _RECAP_MAX_PER_ROW):
-        row = shown[start:start + _RECAP_MAX_PER_ROW]
-        cols = st.columns(len(row))
-        for col, entry in zip(cols, row):
-            col.markdown(
-                f"**{entry['label'] or entry['block'].stem + ' (no data window)'}**"
-            )
-            if raw:
-                col.code(entry["body"], language="text", wrap_lines=True)
-            else:
-                col.markdown(_escape_importance_flags(entry["body"]))
+    if titles and not selected:
+        st.info("Select at least one part of the note to show.")
+        return
+
+    # Stacked top to bottom, most recent first -- a compressed note is a column
+    # of prose, and side-by-side columns cut it too narrow to read.
+    for i, entry in enumerate(shown):
+        label = entry["label"] or (entry["block"].stem + " (no data window)")
+        body = filter_subsections(entry["body"], selected)
+        # `##`, so the week header outranks the note's own `###` subsections.
+        st.markdown(f"## {label}")
+        if not (body or "").strip():
+            st.caption("None of the selected parts appear in this week's note.")
+        elif raw:
+            st.code(body, language="text", wrap_lines=True)
+        else:
+            st.markdown(_escape_importance_flags(body))
+        if i < len(shown) - 1:
+            st.divider()
 
 
 # --- Weekly Monitor note views ---------------------------------------------
