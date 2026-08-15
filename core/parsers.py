@@ -1080,6 +1080,72 @@ def extract_week_sections(block):
     return out
 
 
+# A `### Heading` line inside a section body. Exactly three hashes: `####` and
+# deeper are content *within* a subsection, not a new one, so splitting on them
+# would flatten the note's own hierarchy.
+_SUBSECTION_RE = re.compile(r"^\s{0,3}###(?!#)\s+(\S.*?)\s*$")
+
+
+def split_subsections(text):
+    """Split a section body into its `###` subsections, in document order.
+
+    Sections H and I carry `###` subsections (`### Regime`, `### Scoreboard`,
+    `### Bottom line`, …). This returns `[(title, body), …]`.
+
+    Any text before the first heading is returned first with an empty title,
+    so nothing is silently lost.
+    """
+    if not text:
+        return []
+    lines = text.splitlines()
+    out = []
+    title = ""
+    buf = []
+    for line in lines:
+        m = _SUBSECTION_RE.match(line)
+        if m:
+            if title or "".join(buf).strip():
+                out.append((title, "\n".join(buf).strip()))
+            title = m.group(1)
+            buf = []
+        else:
+            buf.append(line)
+    if title or "".join(buf).strip():
+        out.append((title, "\n".join(buf).strip()))
+    return out
+
+
+def subsection_titles(text):
+    """Ordered `###` subsection titles of a section body (preamble excluded)."""
+    return [t for t, _b in split_subsections(text) if t]
+
+
+def filter_subsections(text, titles):
+    """Keep only the named `###` subsections, in the text's own order.
+
+    The heading lines are preserved so the result still reads as a note. Any
+    preamble before the first heading is always kept -- it belongs to no
+    subsection and so can't be selected against.
+
+    `titles` of None means "keep everything".
+    """
+    if not text:
+        return text
+    if titles is None:
+        return text
+    wanted = set(titles)
+    parts = []
+    for title, body in split_subsections(text):
+        if not title:
+            if body:
+                parts.append(body)
+            continue
+        if title in wanted:
+            parts.append(f"### {title}\n\n{body}".rstrip() if body
+                         else f"### {title}")
+    return "\n\n".join(parts).strip()
+
+
 def week_section_text(block, section_id):
     """Body of one canonical section (by id, e.g. "compressed"), or "".
 
