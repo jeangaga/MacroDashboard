@@ -613,7 +613,7 @@ def tab_weekly_monitor(state):
                 expanded=(note_view == _WEEK_VIEW_PM),
             )
             if not n_sections and not show_releases:
-                missing = ("a compressed note (I)" if note_view == _WEEK_VIEW_PM
+                missing = ("compressed note (I)" if note_view == _WEEK_VIEW_PM
                            else "narrative sections")
                 st.info(
                     f"This week's note has no {missing}. It predates the A-I "

@@ -16,10 +16,21 @@ optional `QUICK`-style command bar.
 ## Tabs
 
 1. **Week Recap** - the landing tile. Section `I` (compressed week note) for
-   the most recent weeks, side by side. Two weeks by default; switch to 1, 3,
-   4, 6 or 8. Beyond four they wrap onto a new row rather than shrinking.
-   Reads the scope's frozen WEEK file, newest week on the left. Weeks with no
-   `I` are counted in a caption rather than silently dropped.
+   the most recent weeks, **stacked newest-first**, one below the other with a
+   divider between them, so you read back through time by scrolling down. Two
+   weeks by default; switch to 1, 3, 4, 6 or 8. Reads the scope's frozen WEEK
+   file. Weeks with no `I` are counted in a caption rather than silently
+   dropped. A **Raw text** checkbox switches from rendered markdown to the
+   verbatim stored text.
+
+   **Parts of the note to show** lists the note's own `###` subsections
+   (Regime / Scoreboard / Major Release Tape / Minor Tape / Central Bank /
+   Signal Tension / Key Releases / Red Team / FX Consensus). All are selected
+   by default; narrowing to one reads that part across several weeks in a
+   column — e.g. just the Scoreboard for the last four weeks. Options come
+   from the notes actually on screen, so they follow the archive rather than a
+   hardcoded list, and a week missing a selected part says so instead of
+   rendering blank.
 2. **Weekly Monitor** - pick a scope (region or currency) and a view
    (Frozen week / Live week / PM style / Macro note), then a **Note view** over
    the A-I spine (PM / Full analysis / Release archive / Full note). An
@@ -127,6 +138,12 @@ file. Old files are never rewritten.
 Numbered headings *inside* a release block (`1. Reuters Data`,
 `3. Comment - Economist Layer`) are not top-level sections — digits can't match
 `[A-I]`, and a header must additionally be ALL-CAPS to count as a spine entry.
+
+**Heading level is ignored.** A section header may be written bare (`A. ...`)
+or as a markdown heading (`# A. ...`, `## A. ...`); all forms parse the same
+and the marker is stripped for display. A single real `USD_WEEK.txt` has
+carried all three at once, so the number of leading hashes is not something the
+parser depends on.
 
 ### Note views (Weekly Monitor)
 
