@@ -365,7 +365,7 @@ _NARRATIVE_PHRASES = (
 # treated as release titles, otherwise the first release in the archive
 # inherits the synthesis header.
 _SYNTHESIS_HEADER_RE = re.compile(
-    r"^\s*[A-D]\.\s+.+\b(?:SYNTHESIS|SCOREBOARD|ARCHIVE|SIGNAL\s+SCOREBOARD)\b",
+    r"^\s*#{0,6}\s*[A-D]\.\s+.+\b(?:SYNTHESIS|SCOREBOARD|ARCHIVE|SIGNAL\s+SCOREBOARD)\b",
     re.I,
 )
 
@@ -444,7 +444,21 @@ NARRATIVE_SECTION_IDS = frozenset({
     "signal_tension", "key_releases", "red_team", "fx_consensus", "compressed",
 })
 
-_TOP_SECTION_RE = re.compile(r"^([A-I])\.\s+(.+)$")
+# The markdown heading level is deliberately NOT part of the contract. One
+# USD_WEEK.txt already carries the same spine three ways -- bare `A.`, `# A.`
+# and `## A.` -- because the note author changed heading style mid-archive.
+# What identifies a section is the letter plus the ALL-CAPS guard, never how
+# many hashes precede it.
+_TOP_SECTION_RE = re.compile(r"^#{0,6}\s*([A-I])\.\s+(.+)$")
+
+
+def _strip_heading_marker(line):
+    """Drop a leading markdown heading marker, keeping the header text.
+
+    So `# I. COMPRESSED WEEK NOTE` and `I. COMPRESSED WEEK NOTE` yield the same
+    `header`, and callers render one without stray hashes.
+    """
+    return re.sub(r"^#{1,6}\s*", "", (line or "").strip())
 
 
 def _top_section_letter(line):
@@ -1015,7 +1029,7 @@ def split_top_level_sections(block_raw_text):
                     (current_letter, current_header, "\n".join(current_body).rstrip())
                 )
             current_letter = letter
-            current_header = stripped
+            current_header = _strip_heading_marker(stripped)
             current_body = []
         elif current_letter is not None:
             current_body.append(line)
@@ -1043,7 +1057,7 @@ def extract_week_sections(block):
 
         {"letter":   "D",
          "id":       "central_bank_tape",
-         "header":   "D. CENTRAL BANK TAPE",   # verbatim header line
+         "header":   "D. CENTRAL BANK TAPE",   # markdown marker stripped
          "body":     "...",                    # up to the next top-level header
          "lettered": True}
     """
@@ -1061,11 +1075,13 @@ def extract_week_sections(block):
             continue
         letter = _top_section_letter(s)
         if letter:
-            heads.append((i, letter, LETTER_SECTION_IDS[letter], s, True))
+            heads.append((i, letter, LETTER_SECTION_IDS[letter],
+                          _strip_heading_marker(s), True))
             continue
         sid = weekly_section_of(line)
         if sid:
-            heads.append((i, SECTION_ID_LETTERS.get(sid, ""), sid, s, False))
+            heads.append((i, SECTION_ID_LETTERS.get(sid, ""), sid,
+                          _strip_heading_marker(s), False))
 
     out = []
     for k, (idx, letter, sid, hdr, lettered) in enumerate(heads):
@@ -1211,12 +1227,12 @@ def extract_week_summary(block):
             continue
         letter = _top_section_letter(s)
         if letter:
-            headers.append((i, "letter:" + letter, s))
+            headers.append((i, "letter:" + letter, _strip_heading_marker(s)))
             continue
         sec = weekly_section_of(line)
         if sec in ("central_bank_tape", "signal_tension", "key_releases", "red_team",
                    "fx_consensus", "compressed"):
-            headers.append((i, sec, s))
+            headers.append((i, sec, _strip_heading_marker(s)))
 
     # Slice each header's body up to the next header.
     spans = []
@@ -1326,11 +1342,11 @@ def extract_macro_synthesis(block):
         if letter:
             # Tag by canonical id, not the bare word "letter": in the new
             # format KEY RELEASES arrives as "F." and must still be found.
-            heads.append((i, LETTER_SECTION_IDS[letter], s))
+            heads.append((i, LETTER_SECTION_IDS[letter], _strip_heading_marker(s)))
             continue
         sec = weekly_section_of(line)
         if sec:
-            heads.append((i, sec, s))
+            heads.append((i, sec, _strip_heading_marker(s)))
     for k, (idx, kind, hdr) in enumerate(heads):
         if kind == "key_releases":
             end = heads[k + 1][0] if k + 1 < len(heads) else len(all_lines)
