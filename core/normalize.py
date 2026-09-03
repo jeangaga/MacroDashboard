@@ -84,6 +84,36 @@ _RULES = [
     # ============================================================
     (re.compile(r"\b(?:gdp|gross\s+domestic\s+product)\b", re.I),    "GDP", "Growth", "High"),
     (re.compile(r"\bretail\s+sales\b", re.I),                        "Retail Sales", "Growth", "High"),
+    # --- PMI family ------------------------------------------------------
+    # These are DIFFERENT recurring releases, not one. A single catch-all
+    # "PMI" rule put Chicago PMI, ISM Manufacturing, ISM Services and every
+    # S&P Global flash/final print in one bucket -- and because the catalogue
+    # dedups on (country, name, reference_period), all but the first of each
+    # month were then silently DROPPED. On the real USD archive that showed
+    # 41 US PMI releases as 9 occurrences.
+    #
+    # Ordered most-specific first: named institution, then sector + stage,
+    # then generic. Lookaheads so token order in the title doesn't matter
+    # ("Flash Manufacturing PMI" == "Manufacturing PMI Flash"), and every
+    # sector rule requires "PMI" so a non-PMI line can't be captured.
+    (re.compile(r"\bchicago\s+pmi\b", re.I),                         "Chicago PMI", "Growth", "High"),
+    (re.compile(r"(?=.*\bism\b)(?=.*(?:non[-\s]?manufacturing|\bn[-\s]?mfg\b|\bservices\b))", re.I),
+                                                                    "ISM Services PMI", "Growth", "High"),
+    (re.compile(r"(?=.*\bism\b)(?=.*(?:\bmanufacturing\b|\bmfg\b))", re.I),
+                                                                    "ISM Manufacturing PMI", "Growth", "High"),
+    (re.compile(r"(?=.*\bpmi\b)(?=.*(?:\bmanufacturing\b|\bmfg\b))(?=.*\bflash\b)", re.I),
+                                                                    "Manufacturing PMI Flash", "Growth", "High"),
+    (re.compile(r"(?=.*\bpmi\b)(?=.*(?:\bservices?\b|\bsvcs?\b))(?=.*\bflash\b)", re.I),
+                                                                    "Services PMI Flash", "Growth", "High"),
+    (re.compile(r"(?=.*\bpmi\b)(?=.*(?:\bcomposite\b|\bcomp\b))(?=.*\bflash\b)", re.I),
+                                                                    "Composite PMI Flash", "Growth", "High"),
+    (re.compile(r"(?=.*\bpmi\b)(?=.*\bflash\b)", re.I),              "PMI Flash", "Growth", "High"),
+    (re.compile(r"(?=.*\bpmi\b)(?=.*(?:\bmanufacturing\b|\bmfg\b))", re.I),
+                                                                    "Manufacturing PMI", "Growth", "High"),
+    (re.compile(r"(?=.*\bpmi\b)(?=.*(?:\bservices?\b|\bsvcs?\b))", re.I),
+                                                                    "Services PMI", "Growth", "High"),
+    (re.compile(r"(?=.*\bpmi\b)(?=.*(?:\bcomposite\b|\bcomp\b))", re.I),
+                                                                    "Composite PMI", "Growth", "High"),
     (re.compile(r"\bpmi\b|\bpurchasing\s+managers\b", re.I),         "PMI", "Growth", "High"),
     (re.compile(r"\bism\b", re.I),                                   "ISM", "Growth", "High"),
     (re.compile(r"\bifo\b", re.I),                                   "Ifo Business Climate", "Growth", "High"),
