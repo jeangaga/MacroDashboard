@@ -1071,22 +1071,48 @@ def _export_filename(country, release_name):
 
 
 def _catalogue_dedup(releases):
-    """Drop duplicates by catalogue_key, keeping the FIRST occurrence.
+    """Collapse duplicate occurrences without ever silently losing a release.
 
     Caller must order `releases` so the preferred occurrence comes first
-    (e.g. frozen before live -- the catalogue does this by ordering
-    `allowed_files` frozen-first). Releases whose `catalogue_key` is empty
-    (no reference_period) are kept as-is so we never collapse two unrelated
-    releases just because their period couldn't be inferred.
+    (frozen before live -- the catalogue orders `allowed_files` frozen-first).
+
+    Three narrow rules:
+
+    * No `catalogue_key` (reference_period couldn't be inferred) -> always
+      kept. We never merge unrelated releases just because the period is
+      unknown.
+    * Same `catalogue_key` from a DIFFERENT source file -> the same event
+      parsed twice, live and frozen. Collapse; frozen wins by ordering.
+    * Same `catalogue_key` AND same `release_key` within one file -> a true
+      duplicate parse of one event. Collapse.
+
+    What is deliberately NOT collapsed: two releases sharing a catalogue_key
+    *within the same file* but differing in date or importance. Those are
+    different releases the normalizer hasn't learned to tell apart yet
+    (Nationwide vs Halifax house prices, New vs Existing home sales,
+    Nationwide vs Tokyo CPI). The old rule collapsed them on
+    (country, name, period) alone, which silently dropped 41 rows from the
+    real archive with nothing in the UI to indicate anything was missing.
+    A duplicate-looking row is a much better failure than a vanished release.
     """
-    seen = set()
+    ck_file = {}
+    seen_rk = set()
     out = []
     for r in releases or []:
         k = catalogue_key(r)
-        if k:
-            if k in seen:
-                continue
-            seen.add(k)
+        if not k:
+            out.append(r)
+            continue
+        rk = release_key(r)
+        if rk and rk in seen_rk:
+            continue
+        first_file = ck_file.get(k)
+        this_file = getattr(r, "source_file", "")
+        if first_file is not None and first_file != this_file:
+            continue
+        ck_file.setdefault(k, this_file)
+        if rk:
+            seen_rk.add(rk)
         out.append(r)
     return out
 
