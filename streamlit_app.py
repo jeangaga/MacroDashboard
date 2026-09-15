@@ -896,6 +896,128 @@ def _seed_macro_note_picker(session_state, sidebar_scope, note_options):
     return default_idx
 
 
+# --- Macro Notes presentation helpers ---------------------------------------
+#
+# Display only. Nothing here touches parsing, version detection or a block's
+# stored raw_text: each helper takes a note's text and returns or renders a
+# view of it. The Markdown in the note stays the source of truth.
+
+# A structural wrapper marker on its own line -- <<CAD_MACRO_NOTE_BEGIN>>,
+# <<<USD_MACRO_NOTE_END>>>. Parser scaffolding, never research content.
+_MACRO_NOTE_MARKER_RE = re.compile(
+    r"^[ \t]*<{2,3}[A-Z0-9_]+_(?:BEGIN|END)>{2,3}[ \t]*$", re.M
+)
+
+# The compressed-note heading: "# I. COMPRESSED NOTE" or "## I. COMPRESSED
+# NOTE", tolerating only surrounding whitespace and case. Deliberately narrow:
+# a looser match could cut ordinary note text ("the compressed note says...").
+_COMPRESSED_HEADING_RE = re.compile(
+    r"^[ \t]*#{1,2}[ \t]*I\.[ \t]+COMPRESSED[ \t]+NOTE[ \t]*$", re.M | re.I
+)
+
+_MD_H1_RE = re.compile(r"^[ \t]*#[ \t]+\S", re.M)
+_MD_H2_RE = re.compile(r"^[ \t]*##[ \t]+\S", re.M)
+
+
+def _strip_macro_note_markers(text):
+    """Drop <<STEM_BEGIN>> / <<STEM_END>> wrapper lines from a note's text."""
+    if not text:
+        return ""
+    return _MACRO_NOTE_MARKER_RE.sub("", text).strip("\n")
+
+
+def _split_compressed_note(text):
+    """Return (full_note, compressed_note) for display. Pure.
+
+    `full_note` is the marker-stripped text up to, but not including, the
+    "# I. COMPRESSED NOTE" heading. `compressed_note` is the body under that
+    heading -- the heading line itself is dropped because the page supplies
+    its own -- or None when the note has no such section. A heading with
+    nothing under it yields "" (present but empty). The first match wins.
+    """
+    cleaned = _strip_macro_note_markers(text)
+    if not cleaned:
+        return "", None
+    m = _COMPRESSED_HEADING_RE.search(cleaned)
+    if not m:
+        return cleaned, None
+    full = cleaned[:m.start()].rstrip()
+    compressed = cleaned[m.end():].strip("\n")
+    return full, (compressed if compressed.strip() else "")
+
+
+def _note_has_h1(text):
+    """True when the note carries its own Markdown H1 title."""
+    return bool(text) and _MD_H1_RE.search(_strip_macro_note_markers(text)) is not None
+
+
+def _split_note_head(full_note):
+    """(head, body): the H1 + metadata block before the first '## ' heading.
+
+    Lets the title and its As-of / Horizon lines sit above the compressed
+    block while the sections follow below it. Nothing is dropped: head + body
+    is the whole note. A note with no '## ' heading has an empty head.
+    """
+    if not full_note:
+        return "", ""
+    m = _MD_H2_RE.search(full_note)
+    if not m:
+        return "", full_note
+    return full_note[:m.start()].rstrip(), full_note[m.start():]
+
+
+def _markdown_for_display(text):
+    """Make note text render faithfully through st.markdown, content unchanged.
+
+    * Every source line break is honoured (two-space hard break). These notes
+      put "As of date:" / "Horizon:" and each signal-board row on consecutive
+      lines with no blank line between; plain Markdown would fold them into
+      one paragraph. Paragraphs in the notes are single lines, so authored
+      Markdown is unaffected. Blank lines stay blank.
+    * Bare importance flags ("****") are escaped so Markdown prints them
+      rather than eating them as emphasis -- same rule as the Week Recap.
+    """
+    if not text:
+        return ""
+    escaped = _escape_importance_flags(text)
+    return "\n".join((ln + "  ") if ln.strip() else ln
+                     for ln in escaped.split("\n"))
+
+
+def _render_macro_note_content(text):
+    """Render one macro-note version as a research page.
+
+    Layout when the note carries "# I. COMPRESSED NOTE":
+        title + metadata (the note's own H1 block)
+        PM COMPRESSED NOTE           (bordered, 30-60 second read)
+        --- divider ---
+        Full Macro Note              (everything else, compressed part removed)
+
+    Otherwise the whole note, formatted. Legacy plain-text notes render the
+    same way; only the display order changes, never the source text.
+    """
+    full, compressed = _split_compressed_note(text)
+    if not full and not compressed:
+        st.info("This note version is empty.")
+        return
+
+    if compressed:
+        head, body = _split_note_head(full) if _note_has_h1(full) else ("", full)
+        if head:
+            st.markdown(_markdown_for_display(head))
+        with st.container(border=True):
+            st.markdown("### PM COMPRESSED NOTE")
+            st.caption("30\u201360 second read")
+            st.markdown(_markdown_for_display(compressed))
+        st.divider()
+        st.markdown("### Full Macro Note")
+        if body:
+            st.markdown(_markdown_for_display(body))
+        return
+
+    st.markdown(_markdown_for_display(full))
+
+
 def tab_macro_notes(state):
     st.header("Macro Notes")
     note_options = [
@@ -961,10 +1083,14 @@ def tab_macro_notes(state):
     st.caption("  |  ".join(header_bits))
 
     if view_mode == "Latest note only":
-        st.markdown(f"### {scope} - Macro Note")
+        # A note that opens with its own H1 is titled by it; only a legacy
+        # plain-text note gets the synthetic scope heading, so there is never
+        # a "### CAD - Macro Note" stacked on "# CAD Macro Note - ...".
+        if not _note_has_h1(latest_block.raw_text):
+            st.markdown(f"### {scope} - Macro Note")
         if latest_label:
             st.caption(f"Data window: {latest_label}")
-        st.code(latest_block.raw_text, language="text", wrap_lines=True)
+        _render_macro_note_content(latest_block.raw_text)
         if previous:
             st.caption(
                 f"{len(previous)} earlier version(s) hidden. "
@@ -980,7 +1106,7 @@ def tab_macro_notes(state):
         for blk, lbl, s, e, _ in previous:
             label = lbl or (e.isoformat() if e else f"{blk.stem} (no window)")
             with st.expander(f"Data window: {label}", expanded=False):
-                st.code(blk.raw_text, language="text", wrap_lines=True)
+                _render_macro_note_content(blk.raw_text)
         return
 
     # Archive mode: latest + all previous, all collapsed in one timeline.
@@ -989,7 +1115,7 @@ def tab_macro_notes(state):
         label = lbl or (e.isoformat() if e else f"{blk.stem} (no window)")
         prefix = "Latest" if j == 0 else "Previous"
         with st.expander(f"{prefix}  -  Data window: {label}", expanded=False):
-            st.code(blk.raw_text, language="text", wrap_lines=True)
+            _render_macro_note_content(blk.raw_text)
 
 
 _CONFIDENCE_ICON = {"High": "H", "Medium": "M", "Low": "L"}
