@@ -679,7 +679,7 @@ def tab_weekly_monitor(state):
 
         st.caption(f"{len(sorted_releases)} release(s) in this window")
         for r in sorted_releases:
-            render_release_card(r, default_expanded=False)
+            render_release_card(r, default_expanded=False, pm_summary=True)
 
         # Central Bank Tape last, as one grouped card. Only in the archive
         # view -- the analysis and full-note views already render section D

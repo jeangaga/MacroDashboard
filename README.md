@@ -159,7 +159,7 @@ parser depends on.
 |---|---|
 | PM view | `I` only |
 | Full analysis | `A`, `B`, `D`–`H` |
-| Release archive | `C`, as release cards + the grouped tape card |
+| Release archive | `C`, as release cards + the grouped tape card. Under each card the release’s `PM FLASH` / `PM READ-THROUGH` / `PM DEBATE & KEY TAKEAWAYS` texts show as three compact lines (no labels) without expanding; releases without those fields look as before |
 | Full note | `A`–`I` |
 
 PM view is the default **when the displayed week actually has an `I`**;
