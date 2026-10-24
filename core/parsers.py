@@ -1162,6 +1162,66 @@ def filter_subsections(text, titles):
     return "\n\n".join(parts).strip()
 
 
+# --- PM summary fields inside a release block -------------------------------
+#
+# Newer releases open with three one-line PM fields between "Importance:" and
+# "1. Reuters Data":
+#     PM FLASH: ...
+#     PM READ-THROUGH: ...
+#     PM DEBATE & KEY TAKEAWAYS: ...
+# They are extracted per release block, never from the file as a whole, so a
+# summary can only ever belong to the release whose raw_block it sits in.
+PM_SUMMARY_FIELDS = ("PM FLASH", "PM READ-THROUGH", "PM DEBATE & KEY TAKEAWAYS")
+
+_PM_FIELD_RE = re.compile(
+    r"^[ \t]*(PM FLASH|PM READ-THROUGH|PM DEBATE & KEY TAKEAWAYS):[ \t]*", re.M
+)
+# A value ends at the next PM field or at the "1. Reuters Data" sub-heading
+# (bare or as a markdown heading), whichever comes first.
+_PM_STOP_RE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*)?1\.[ \t]+Reuters[ \t]+Data\b", re.M)
+# Internal wording the author sometimes uses inside the DEBATE field. It is
+# not a field label and is not shown as one; the sentences stay.
+_PM_SUBLABEL_RE = re.compile(
+    r"(?i)(?:^|(?<=\s))(?:Debate|Professional insight|Key takeaways?)[ \t]*:[ \t]*"
+)
+
+
+def extract_pm_summary(text):
+    """Return the PM summary fields of ONE release block, in canonical order.
+
+    `[(field, value), ...]` for the fields present with a non-empty value --
+    `[]` when the block has none, so older releases are unaffected. Values
+    are the author's text with line breaks and runs of whitespace collapsed
+    to single spaces and internal sub-labels ("Debate:", "Key takeaways:",
+    "Professional insight:") removed; nothing is invented or reworded.
+
+    Each field is taken at its first occurrence. A value runs to the next PM
+    field or to "1. Reuters Data", so text from the detailed sections -- or
+    from a following release, should two ever share a block -- is never
+    captured.
+    """
+    if not text:
+        return []
+    matches = list(_PM_FIELD_RE.finditer(text))
+    if not matches:
+        return []
+    found = {}
+    for k, m in enumerate(matches):
+        name = m.group(1)
+        if name in found:
+            continue
+        end = matches[k + 1].start() if k + 1 < len(matches) else len(text)
+        stop = _PM_STOP_RE.search(text, m.end(), end)
+        if stop:
+            end = stop.start()
+        value = text[m.end():end]
+        value = _PM_SUBLABEL_RE.sub("", value)
+        value = " ".join(value.split())
+        if value:
+            found[name] = value
+    return [(f, found[f]) for f in PM_SUMMARY_FIELDS if f in found]
+
+
 def week_section_text(block, section_id):
     """Body of one canonical section (by id, e.g. "compressed"), or "".
 

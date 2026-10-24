@@ -60,11 +60,18 @@ def render_block(block, *, min_importance=None, levels=None):
         render_release_card(r)
 
 
-def render_release_card(release, *, default_expanded=False):
+def render_release_card(release, *, default_expanded=False, pm_summary=False):
     """Compact, collapsed-by-default release card.
 
     Header: title  ·  ****  ·  date  ·  country (if any)
     Body (when expanded): scope/file/themes meta + the full raw block.
+
+    `pm_summary=True` (Weekly Monitor -> Release archive only) also prints the
+    release's PM FLASH / READ-THROUGH / DEBATE texts as three compact lines
+    directly under the header, readable without expanding. Streamlit cannot
+    put content inside a collapsed expander's header, so the lines sit
+    immediately below the expander box, before the next card; a release with
+    no PM fields renders exactly as before.
     """
     # Header format: "[date] | [importance] | [country] - [title]"
     date_part = release.date_str or "no date"
@@ -85,6 +92,15 @@ def render_release_card(release, *, default_expanded=False):
             "Themes: " + (", ".join(release.themes) if release.themes else "-")
         )
         st.code(release.raw_block, language="text", wrap_lines=True)
+
+    if pm_summary:
+        from core.parsers import extract_pm_summary
+
+        lines = [value for _field, value in extract_pm_summary(release.raw_block)]
+        if lines:
+            # One caption, hard line breaks between the three texts: small
+            # proportional type, no box, minimal spacing. Labels are not shown.
+            st.caption("  \n".join(lines))
 
 
 def render_central_bank_tape(tape_text, releases=None, *, default_expanded=False):
