@@ -415,19 +415,19 @@ _WEEK_VIEW_SECTIONS = {
 # Views that render the section-C release cards.
 _WEEK_VIEWS_WITH_RELEASES = {_WEEK_VIEW_ARCHIVE, _WEEK_VIEW_FULL}
 
+# How many of the most recent weeks the Week selector opens on. A file with
+# this many weeks or fewer simply opens on "All weeks".
+_WM_DEFAULT_WEEKS = 4
+
 
 def _default_week_view(blocks):
-    """Pick the Weekly Monitor's default note view for a set of weekly blocks.
+    """The Weekly Monitor's default note view: the release archive, always.
 
-    Section I is the intended quick view, but it only exists in the new note
-    format -- every note written before it would render as a blank tab. So the
-    PM view is the default only when at least one displayed week actually has
-    an I, and otherwise we fall back to the release archive (the behaviour this
-    tab has always had).
+    The monitor opens on the week-by-week release cards; the compressed note
+    (section I) is one Note-view switch away and has its own Week Recap tab.
+    `blocks` is accepted but unused so the seeding logic and the tests keep a
+    single place to ask.
     """
-    for b in blocks or []:
-        if has_week_section(b, "compressed"):
-            return _WEEK_VIEW_PM
     return _WEEK_VIEW_ARCHIVE
 
 
@@ -536,9 +536,16 @@ def tab_weekly_monitor(state):
         reverse=True,
     )
 
-    # Week selector if there is more than one weekly entry.
+    # Week selector if there is more than one weekly entry. Aggregate options
+    # first ("All weeks", then "Last N weeks" when the file holds more than
+    # N), then one entry per week, newest first.
     if len(entries) > 1:
-        options = ["All weeks"] + [
+        has_recent = len(entries) > _WM_DEFAULT_WEEKS
+        options = ["All weeks"]
+        if has_recent:
+            options.append(f"Last {_WM_DEFAULT_WEEKS} weeks")
+        n_aggregate = len(options)
+        options += [
             (e["label"] or f"{e['block'].stem} (no window)")
             + (f"  -  {e['source']}" if e.get("source") else "")
             for e in entries
@@ -547,13 +554,15 @@ def tab_weekly_monitor(state):
             "Week",
             options=list(range(len(options))),
             format_func=lambda i: options[i],
-            index=0,  # default = "All weeks"
+            index=1 if has_recent else 0,  # default = "Last 4 weeks" when available
             key=f"wm_week_{scope}_{view}",
         )
         if choice == 0:
             selected_entries = entries
+        elif has_recent and choice == 1:
+            selected_entries = entries[:_WM_DEFAULT_WEEKS]
         else:
-            selected_entries = [entries[choice - 1]]
+            selected_entries = [entries[choice - n_aggregate]]
     else:
         selected_entries = entries
 

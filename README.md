@@ -162,9 +162,10 @@ parser depends on.
 | Release archive | `C`, as release cards + the grouped tape card. Under each card the release’s `PM FLASH` / `PM READ-THROUGH` / `PM DEBATE & KEY TAKEAWAYS` texts show as three compact lines (no labels) without expanding; releases without those fields look as before |
 | Full note | `A`–`I` |
 
-PM view is the default **when the displayed week actually has an `I`**;
-otherwise the tab falls back to Release archive. Without that fallback every
-pre-A-I note would open on a blank tab.
+The tab opens on **Release archive** for the **last 4 weeks** (the Week
+selector offers *All weeks*, *Last 4 weeks*, then one entry per week; a file
+with 4 weeks or fewer opens on *All weeks*). The compressed note is one Note
+view switch away, and has its own Week Recap tab.
 
 ## Parser notes
 
